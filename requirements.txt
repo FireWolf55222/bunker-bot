@@ -1,0 +1,10 @@
+aiogram==3.2.0
+python-dotenv==1.0.0
+aiogram-calendar==1.0.3
+aiogram-calendar==0.6.0
+apscheduler==3.10.4
+
+
+
+
+
