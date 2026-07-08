@@ -69,7 +69,6 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
 
-    # 1. Создаём таблицу, если её нет (со всеми нужными колонками)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,7 +89,6 @@ def init_db():
         )
     """)
 
-    # 2. Проверяем, есть ли нужные колонки (на случай, если таблица уже существует, но без них)
     cur.execute("PRAGMA table_info(requests)")
     existing_columns = [col[1] for col in cur.fetchall()]
 
@@ -387,8 +385,9 @@ async def cmd_start(message: types.Message, state: FSMContext):
         "• 🧽 Полировка\n"
         "• 🧹 Химчистка\n"
         "• 🪟 Тонировка\n\n"
-        "📍 <b>Адрес:</b>Тюмень, ул. Сиреневая, 25\n"
-        "📞 <b>Телефон:</b> <a href='tel:+79222220572'>+7 (922) 222-05-72</a>\n"
+        "📍 <b>Адрес:</b> ул. Автомобильная, 123\n"
+        "📞 <b>Телефон:</b> <a href='tel:+71234567890'>+7 (123) 456-78-90</a>\n"
+        "📸 <b>Instagram:</b> @bunker_detailing\n\n"
         "👇 Нажмите, чтобы записаться"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -875,7 +874,7 @@ async def show_stats(callback: CallbackQuery):
     ])
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
-# ---------- Запуск с Flask для Render ----------
+# ---------- Flask приложение ----------
 app = Flask(__name__)
 
 @app.route('/')
@@ -886,6 +885,7 @@ def home():
 def health():
     return "OK", 200
 
+# ---------- Запуск ----------
 async def run_bot():
     init_db()
     logging.info("Бот BUNKER запущен")
@@ -901,14 +901,14 @@ async def run_bot():
     logging.info("Планировщик напоминаний запущен")
     await dp.start_polling(bot)
 
-def start_bot_thread():
-    asyncio.run(run_bot())
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 if __name__ == "__main__":
-    # Запускаем бота в отдельном потоке
-    bot_thread = threading.Thread(target=start_bot_thread)
-    bot_thread.start()
+    # Запускаем Flask в отдельном потоке
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
     
-    # Запускаем Flask для Render
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    # Запускаем бота в основном потоке
+    asyncio.run(run_bot())
