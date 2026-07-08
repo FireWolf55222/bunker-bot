@@ -7,7 +7,7 @@ import threading
 from datetime import datetime, timedelta
 from os import getenv, path
 
-from flask import Flask
+from flask import Flask, send_file
 from aiogram import Bot, Dispatcher, Router, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -385,8 +385,9 @@ async def cmd_start(message: types.Message, state: FSMContext):
         "• 🧽 Полировка\n"
         "• 🧹 Химчистка\n"
         "• 🪟 Тонировка\n\n"
-        "📍 <b>Адрес:</b>Тюмень ул. Сиреневая, 25\n"
-        "📞 <b>Телефон:</b> <a href='tel:+79222220572'>+7 (922) 222-05-72</a>\n"
+        "📍 <b>Адрес:</b> ул. Автомобильная, 123\n"
+        "📞 <b>Телефон:</b> <a href='tel:+71234567890'>+7 (123) 456-78-90</a>\n"
+        "📸 <b>Instagram:</b> @bunker_detailing\n\n"
         "👇 Нажмите, чтобы записаться"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -735,13 +736,27 @@ async def show_main_menu(message: types.Message, edit=False):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 Список заявок", callback_data="list_all")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
-        [InlineKeyboardButton(text="🔍 Фильтр по статусу", callback_data="filter_menu")]
+        [InlineKeyboardButton(text="🔍 Фильтр по статусу", callback_data="filter_menu")],
+        [InlineKeyboardButton(text="📥 Скачать БД", callback_data="download_db")]  # Новая кнопка
     ])
     text = "🏢 <b>Админ-панель BUNKER</b>\nВыберите действие:"
     if edit:
         await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     else:
         await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+# Обработчик скачивания базы данных
+@router.callback_query(lambda c: c.data == "download_db")
+async def download_db(callback: CallbackQuery):
+    if callback.from_user.id != MANAGER_ID:
+        await callback.answer("⛔ Доступ запрещён", show_alert=True)
+        return
+    await callback.answer("Подготовка файла...")
+    if path.exists(DB_NAME):
+        file = FSInputFile(DB_NAME, filename=f"bunker_requests_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db")
+        await callback.message.answer_document(file, caption="📦 Выгрузка базы данных")
+    else:
+        await callback.message.answer("❌ Файл базы данных не найден.")
 
 @router.callback_query(lambda c: c.data == "admin_main")
 async def back_to_main(callback: CallbackQuery):
@@ -883,6 +898,14 @@ def home():
 @app.route('/health')
 def health():
     return "OK", 200
+
+@app.route('/download_db')
+def download_db_web():
+    """Скачать БД через браузер (по ссылке)"""
+    if path.exists(DB_NAME):
+        return send_file(DB_NAME, as_attachment=True, download_name=f"bunker_requests_{datetime.now().strftime('%Y%m%d')}.db")
+    else:
+        return "Файл не найден", 404
 
 # ---------- Запуск ----------
 async def run_bot():
