@@ -2,9 +2,12 @@ import asyncio
 import logging
 import sqlite3
 import html
+import os
+import threading
 from datetime import datetime, timedelta
 from os import getenv, path
 
+from flask import Flask
 from aiogram import Bot, Dispatcher, Router, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -66,7 +69,7 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
 
-    # 1. Сначала создаём таблицу, если её нет (с основными колонками)
+    # 1. Создаём таблицу, если её нет (со всеми нужными колонками)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,11 +84,13 @@ def init_db():
             phone TEXT,
             comment TEXT,
             status TEXT DEFAULT 'новая',
-            created_at TEXT
+            created_at TEXT,
+            reminder_24h_sent BOOLEAN DEFAULT 0,
+            reminder_1h_sent BOOLEAN DEFAULT 0
         )
     """)
 
-    # 2. Теперь таблица существует, добавляем колонки для напоминаний (если их нет)
+    # 2. Проверяем, есть ли нужные колонки (на случай, если таблица уже существует, но без них)
     cur.execute("PRAGMA table_info(requests)")
     existing_columns = [col[1] for col in cur.fetchall()]
 
@@ -181,7 +186,6 @@ def get_stats():
     return total, by_category, by_status
 
 def get_all_active_requests():
-    """Возвращает все активные заявки (не отменены, не выполнены) для проверки напоминаний."""
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute("""
@@ -195,7 +199,6 @@ def get_all_active_requests():
     return rows
 
 def mark_reminder_sent(req_id, reminder_type):
-    """Помечает, что напоминание отправлено (24h или 1h)."""
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     if reminder_type == '24h':
@@ -205,7 +208,7 @@ def mark_reminder_sent(req_id, reminder_type):
     conn.commit()
     conn.close()
 
-# ---------- Функции проверки доступности ----------
+# ---------- Проверка доступности ----------
 def is_date_available(date_str):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -263,34 +266,27 @@ def get_available_time_slots(date_str, duration_hours):
 
 # ---------- Функция отправки напоминаний ----------
 async def send_reminders(bot: Bot):
-    """Проверяет активные заявки и отправляет напоминания."""
     now = datetime.now()
     requests = get_all_active_requests()
     for req in requests:
         req_id, user_id, username, date_str, time_start, category, subcategory, rem24, rem1 = req
         try:
-            # Парсим дату
             dt_date = datetime.strptime(date_str, "%d.%m.%Y")
         except:
             continue
 
-        # Определяем время записи
         if time_start:
-            # есть время (тонировка)
             try:
                 h, m = map(int, time_start.split(':'))
                 dt_appointment = dt_date.replace(hour=h, minute=m, second=0, microsecond=0)
             except:
                 continue
         else:
-            # нет времени – считаем, что услуга начинается в 10:00 (начало рабочего дня)
             dt_appointment = dt_date.replace(hour=WORK_START_HOUR, minute=0, second=0, microsecond=0)
 
-        # Проверка на 24 часа
         if not rem24:
             delta = dt_appointment - now
             if timedelta(hours=23.5) <= delta <= timedelta(hours=24.5):
-                # Отправляем напоминание за 24 часа
                 text = (
                     f"📅 <b>Напоминание!</b>\n"
                     f"Вы записаны в BUNKER Detailing на завтра.\n"
@@ -307,7 +303,6 @@ async def send_reminders(bot: Bot):
                 except Exception as e:
                     logging.error(f"Ошибка отправки напоминания 24ч для {req_id}: {e}")
 
-        # Проверка на 1 час (только если есть time_start)
         if time_start and not rem1:
             delta = dt_appointment - now
             if timedelta(minutes=55) <= delta <= timedelta(minutes=65):
@@ -325,7 +320,7 @@ async def send_reminders(bot: Bot):
                 except Exception as e:
                     logging.error(f"Ошибка отправки напоминания 1ч для {req_id}: {e}")
 
-# ---------- FSM состояния ----------
+# ---------- FSM ----------
 class Booking(StatesGroup):
     waiting_service_category = State()
     waiting_service_subcategory = State()
@@ -351,7 +346,7 @@ confirm_kb = ReplyKeyboardMarkup(
     one_time_keyboard=True
 )
 
-# ---------- Инициализация бота ----------
+# ---------- Бот ----------
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
@@ -392,7 +387,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
         "• 🧽 Полировка\n"
         "• 🧹 Химчистка\n"
         "• 🪟 Тонировка\n\n"
-        "📍 <b>Адрес:</b> Тюмень, ул. Сиреневая, 25\n"
+        "📍 <b>Адрес:</b>Тюмень, ул. Сиреневая, 25\n"
         "📞 <b>Телефон:</b> <a href='tel:+79222220572'>+7 (922) 222-05-72</a>\n"
         "👇 Нажмите, чтобы записаться"
     )
@@ -684,7 +679,6 @@ async def process_confirm(message: types.Message, state: FSMContext):
             data.get('phone'),
             data.get('comment')
         )
-        # Уведомление менеджеру
         report = (
             f"🚗 <b>Новая заявка # {req_id}</b>\n"
             f"🛠 Услуга: {html.escape(data.get('category'))} → {html.escape(data.get('subcategory'))}\n"
@@ -881,13 +875,20 @@ async def show_stats(callback: CallbackQuery):
     ])
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
-# ---------- Запуск с планировщиком ----------
-async def main():
-    # Инициализация БД
+# ---------- Запуск с Flask для Render ----------
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "✅ Бот BUNKER работает!"
+
+@app.route('/health')
+def health():
+    return "OK", 200
+
+async def run_bot():
     init_db()
     logging.info("Бот BUNKER запущен")
-
-    # Создаём планировщик для напоминаний (каждые 30 секунд)
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         send_reminders,
@@ -898,9 +899,16 @@ async def main():
     )
     scheduler.start()
     logging.info("Планировщик напоминаний запущен")
-
-    # Запускаем polling
     await dp.start_polling(bot)
 
+def start_bot_thread():
+    asyncio.run(run_bot())
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Запускаем бота в отдельном потоке
+    bot_thread = threading.Thread(target=start_bot_thread)
+    bot_thread.start()
+    
+    # Запускаем Flask для Render
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
