@@ -65,14 +65,8 @@ def is_long_duration(duration_hours):
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-    # Добавляем поля для флагов напоминаний, если их нет
-    cur.execute("PRAGMA table_info(requests)")
-    columns = [col[1] for col in cur.fetchall()]
-    if "reminder_24h_sent" not in columns:
-        cur.execute("ALTER TABLE requests ADD COLUMN reminder_24h_sent BOOLEAN DEFAULT 0")
-    if "reminder_1h_sent" not in columns:
-        cur.execute("ALTER TABLE requests ADD COLUMN reminder_1h_sent BOOLEAN DEFAULT 0")
 
+    # 1. Сначала создаём таблицу, если её нет
     cur.execute("""
         CREATE TABLE IF NOT EXISTS requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,11 +81,23 @@ def init_db():
             phone TEXT,
             comment TEXT,
             status TEXT DEFAULT 'новая',
-            created_at TEXT,
-            reminder_24h_sent BOOLEAN DEFAULT 0,
-            reminder_1h_sent BOOLEAN DEFAULT 0
+            created_at TEXT
         )
     """)
+
+    # 2. Теперь, когда таблица точно есть, добавляем недостающие колонки
+    # Получаем список существующих колонок
+    cur.execute("PRAGMA table_info(requests)")
+    existing_columns = [col[1] for col in cur.fetchall()]
+
+    # Добавляем колонку для флага напоминания за 24 часа, если её нет
+    if "reminder_24h_sent" not in existing_columns:
+        cur.execute("ALTER TABLE requests ADD COLUMN reminder_24h_sent BOOLEAN DEFAULT 0")
+
+    # Добавляем колонку для флага напоминания за 1 час, если её нет
+    if "reminder_1h_sent" not in existing_columns:
+        cur.execute("ALTER TABLE requests ADD COLUMN reminder_1h_sent BOOLEAN DEFAULT 0")
+
     conn.commit()
     conn.close()
 
