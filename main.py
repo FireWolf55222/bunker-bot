@@ -61,14 +61,10 @@ SLOT_INTERVAL = 30
 def get_service_params(category, subcategory):
     return SERVICES.get(category, {}).get(subcategory, {"duration": 1, "requires_time": False})
 
-def is_long_duration(duration_hours):
-    return duration_hours >= 8
-
 # ---------- База данных ----------
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-
     cur.execute("""
         CREATE TABLE IF NOT EXISTS requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,16 +84,12 @@ def init_db():
             reminder_1h_sent BOOLEAN DEFAULT 0
         )
     """)
-
     cur.execute("PRAGMA table_info(requests)")
     existing_columns = [col[1] for col in cur.fetchall()]
-
     if "reminder_24h_sent" not in existing_columns:
         cur.execute("ALTER TABLE requests ADD COLUMN reminder_24h_sent BOOLEAN DEFAULT 0")
-
     if "reminder_1h_sent" not in existing_columns:
         cur.execute("ALTER TABLE requests ADD COLUMN reminder_1h_sent BOOLEAN DEFAULT 0")
-
     conn.commit()
     conn.close()
 
@@ -262,7 +254,7 @@ def get_available_time_slots(date_str, duration_hours):
         t += step
     return slots
 
-# ---------- Функция отправки напоминаний ----------
+# ---------- Напоминания ----------
 async def send_reminders(bot: Bot):
     now = datetime.now()
     requests = get_all_active_requests()
@@ -299,7 +291,7 @@ async def send_reminders(bot: Bot):
                     mark_reminder_sent(req_id, '24h')
                     logging.info(f"Отправлено напоминание за 24ч для заявки {req_id}")
                 except Exception as e:
-                    logging.error(f"Ошибка отправки напоминания 24ч для {req_id}: {e}")
+                    logging.error(f"Ошибка напоминания 24ч для {req_id}: {e}")
 
         if time_start and not rem1:
             delta = dt_appointment - now
@@ -316,9 +308,9 @@ async def send_reminders(bot: Bot):
                     mark_reminder_sent(req_id, '1h')
                     logging.info(f"Отправлено напоминание за 1ч для заявки {req_id}")
                 except Exception as e:
-                    logging.error(f"Ошибка отправки напоминания 1ч для {req_id}: {e}")
+                    logging.error(f"Ошибка напоминания 1ч для {req_id}: {e}")
 
-# ---------- FSM состояния ----------
+# ---------- FSM ----------
 class Booking(StatesGroup):
     waiting_service_category = State()
     waiting_service_subcategory = State()
@@ -344,14 +336,14 @@ confirm_kb = ReplyKeyboardMarkup(
     one_time_keyboard=True
 )
 
-# ---------- Инициализация бота ----------
+# ---------- Бот ----------
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
 dp.include_router(router)
 
-# ---------- Вспомогательные функции для админки ----------
+# ---------- Вспомогательные функции админки ----------
 def format_request_row(row):
     req_id, user_id, username, category, subcategory, date_str, time_start, duration, car, phone, comment, status, created_at, rem24, rem1 = row
     status_emoji = {
@@ -385,9 +377,8 @@ async def cmd_start(message: types.Message, state: FSMContext):
         "• 🧽 Полировка\n"
         "• 🧹 Химчистка\n"
         "• 🪟 Тонировка\n\n"
-        "📍 <b>Адрес:</b> ул. Автомобильная, 123\n"
-        "📞 <b>Телефон:</b> <a href='tel:+71234567890'>+7 (123) 456-78-90</a>\n"
-        "📸 <b>Instagram:</b> @bunker_detailing\n\n"
+        "📍 <b>Адрес:</b> Тюмень, ул. Сиреневая, 25\n"
+        "📞 <b>Телефон:</b> <a href='tel:+79222220572'>+7 (922) 222-05-72</a>\n"
         "👇 Нажмите, чтобы записаться"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -887,7 +878,7 @@ async def show_stats(callback: CallbackQuery):
     ])
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
-# ---------- Flask приложение ----------
+# ---------- Flask для здоровья ----------
 app = Flask(__name__)
 
 @app.route('/')
@@ -902,13 +893,17 @@ def health():
 def download_db_web():
     if path.exists(DB_NAME):
         return send_file(DB_NAME, as_attachment=True, download_name=f"bunker_requests_{datetime.now().strftime('%Y%m%d')}.db")
-    else:
-        return "Файл не найден", 404
+    return "Файл не найден", 404
 
 # ---------- Запуск ----------
 async def run_bot():
     init_db()
     logging.info("Бот BUNKER запущен")
+
+    # Удаляем вебхук, если он был установлен ранее
+    await bot.delete_webhook(drop_pending_updates=True)
+    logging.info("Вебхук удалён, запускаем polling")
+
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         send_reminders,
@@ -926,8 +921,6 @@ def run_flask():
     app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 if __name__ == "__main__":
-    # Запускаем Flask в отдельном потоке
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    # Запускаем бота в основном потоке
     asyncio.run(run_bot())
