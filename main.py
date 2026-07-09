@@ -7,6 +7,7 @@ import threading
 from datetime import datetime, timedelta
 from os import getenv, path
 
+import aiohttp  # Добавлено для keepalive
 from flask import Flask, send_file
 from aiogram import Bot, Dispatcher, Router, types
 from aiogram.filters import Command
@@ -377,8 +378,9 @@ async def cmd_start(message: types.Message, state: FSMContext):
         "• 🧽 Полировка\n"
         "• 🧹 Химчистка\n"
         "• 🪟 Тонировка\n\n"
-        "📍 <b>Адрес:</b> Тюмень, ул. Сиреневая, 25\n"
-        "📞 <b>Телефон:</b> <a href='tel:+79222220572'>+7 (922) 222-05-72</a>\n"
+        "📍 <b>Адрес:</b> ул. Автомобильная, 123\n"
+        "📞 <b>Телефон:</b> <a href='tel:+71234567890'>+7 (123) 456-78-90</a>\n"
+        "📸 <b>Instagram:</b> @bunker_detailing\n\n"
         "👇 Нажмите, чтобы записаться"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -878,7 +880,7 @@ async def show_stats(callback: CallbackQuery):
     ])
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
-# ---------- Flask для здоровья ----------
+# ---------- Flask для здоровья и скачивания БД ----------
 app = Flask(__name__)
 
 @app.route('/')
@@ -895,15 +897,38 @@ def download_db_web():
         return send_file(DB_NAME, as_attachment=True, download_name=f"bunker_requests_{datetime.now().strftime('%Y%m%d')}.db")
     return "Файл не найден", 404
 
+# ---------- Keepalive (внутренний пинг для предотвращения засыпания) ----------
+async def keepalive():
+    """Каждые 5 минут отправляет запрос к своему health-эндпоинту, чтобы Render не считал сервис неактивным."""
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get("http://localhost:10000/health") as resp:
+                    if resp.status == 200:
+                        logging.debug("Keepalive ping successful")
+                    else:
+                        logging.warning(f"Keepalive ping returned status {resp.status}")
+        except Exception as e:
+            logging.error(f"Keepalive ping failed: {e}")
+        await asyncio.sleep(300)  # 5 минут
+
 # ---------- Запуск ----------
 async def run_bot():
     init_db()
     logging.info("Бот BUNKER запущен")
 
-    # Удаляем вебхук, если он был установлен ранее
-    await bot.delete_webhook(drop_pending_updates=True)
-    logging.info("Вебхук удалён, запускаем polling")
+    # Удаляем вебхук, если он был установлен ранее (решит проблему конфликта)
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        logging.info("Вебхук успешно удалён")
+    except Exception as e:
+        logging.error(f"Ошибка при удалении вебхука: {e}")
 
+    # Запускаем задачу keepalive (не блокируем основной поток)
+    asyncio.create_task(keepalive())
+    logging.info("Keepalive задача запущена (каждые 5 минут)")
+
+    # Планировщик напоминаний
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         send_reminders,
@@ -914,6 +939,8 @@ async def run_bot():
     )
     scheduler.start()
     logging.info("Планировщик напоминаний запущен")
+
+    # Запускаем polling
     await dp.start_polling(bot)
 
 def run_flask():
@@ -921,6 +948,8 @@ def run_flask():
     app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 if __name__ == "__main__":
+    # Запускаем Flask в отдельном потоке, чтобы не блокировать основной
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
+    # Запускаем бота в основном потоке
     asyncio.run(run_bot())
