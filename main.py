@@ -3,11 +3,10 @@ import logging
 import sqlite3
 import html
 import os
-import threading
 from datetime import datetime, timedelta
 from os import getenv, path
 
-from flask import Flask, send_file
+from flask import Flask, request, jsonify
 from aiogram import Bot, Dispatcher, Router, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -21,6 +20,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     CallbackQuery,
     FSInputFile,
+    Update,
 )
 from aiogram_calendar import SimpleCalendar, SimpleCalendarCallback
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -61,14 +61,10 @@ SLOT_INTERVAL = 30
 def get_service_params(category, subcategory):
     return SERVICES.get(category, {}).get(subcategory, {"duration": 1, "requires_time": False})
 
-def is_long_duration(duration_hours):
-    return duration_hours >= 8
-
 # ---------- База данных ----------
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-
     cur.execute("""
         CREATE TABLE IF NOT EXISTS requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,16 +84,12 @@ def init_db():
             reminder_1h_sent BOOLEAN DEFAULT 0
         )
     """)
-
     cur.execute("PRAGMA table_info(requests)")
     existing_columns = [col[1] for col in cur.fetchall()]
-
     if "reminder_24h_sent" not in existing_columns:
         cur.execute("ALTER TABLE requests ADD COLUMN reminder_24h_sent BOOLEAN DEFAULT 0")
-
     if "reminder_1h_sent" not in existing_columns:
         cur.execute("ALTER TABLE requests ADD COLUMN reminder_1h_sent BOOLEAN DEFAULT 0")
-
     conn.commit()
     conn.close()
 
@@ -344,7 +336,7 @@ confirm_kb = ReplyKeyboardMarkup(
     one_time_keyboard=True
 )
 
-# ---------- Бот ----------
+# ---------- Бот и диспетчер ----------
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
@@ -385,9 +377,8 @@ async def cmd_start(message: types.Message, state: FSMContext):
         "• 🧽 Полировка\n"
         "• 🧹 Химчистка\n"
         "• 🪟 Тонировка\n\n"
-        "📍 <b>Адрес:</b> ул. Автомобильная, 123\n"
-        "📞 <b>Телефон:</b> <a href='tel:+71234567890'>+7 (123) 456-78-90</a>\n"
-        "📸 <b>Instagram:</b> @bunker_detailing\n\n"
+        "📍 <b>Адрес:</b> Тюмнь, ул. Сиреневая, 25\n"
+        "📞 <b>Телефон:</b> <a href='tel:+79222220572'>+7 (922) 222-05-72</a>\n"
         "👇 Нажмите, чтобы записаться"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -737,7 +728,7 @@ async def show_main_menu(message: types.Message, edit=False):
         [InlineKeyboardButton(text="📋 Список заявок", callback_data="list_all")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
         [InlineKeyboardButton(text="🔍 Фильтр по статусу", callback_data="filter_menu")],
-        [InlineKeyboardButton(text="📥 Скачать БД", callback_data="download_db")]  # Новая кнопка
+        [InlineKeyboardButton(text="📥 Скачать БД", callback_data="download_db")]
     ])
     text = "🏢 <b>Админ-панель BUNKER</b>\nВыберите действие:"
     if edit:
@@ -745,7 +736,6 @@ async def show_main_menu(message: types.Message, edit=False):
     else:
         await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
-# Обработчик скачивания базы данных
 @router.callback_query(lambda c: c.data == "download_db")
 async def download_db(callback: CallbackQuery):
     if callback.from_user.id != MANAGER_ID:
@@ -888,7 +878,7 @@ async def show_stats(callback: CallbackQuery):
     ])
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
-# ---------- Flask приложение ----------
+# ---------- Flask приложение для вебхука ----------
 app = Flask(__name__)
 
 @app.route('/')
@@ -899,18 +889,43 @@ def home():
 def health():
     return "OK", 200
 
-@app.route('/download_db')
-def download_db_web():
-    """Скачать БД через браузер (по ссылке)"""
-    if path.exists(DB_NAME):
-        return send_file(DB_NAME, as_attachment=True, download_name=f"bunker_requests_{datetime.now().strftime('%Y%m%d')}.db")
-    else:
-        return "Файл не найден", 404
+@app.route('/webhook', methods=['POST'])
+async def webhook():
+    try:
+        update = Update(**request.get_json())
+        await dp.feed_update(bot, update)
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        logging.error(f"Ошибка обработки вебхука: {e}")
+        return jsonify({"error": str(e)}), 500
 
-# ---------- Запуск ----------
-async def run_bot():
+# ---------- Настройка вебхука ----------
+async def set_webhook():
+    # Получаем внешний URL из переменной Render
+    external_host = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+    if not external_host:
+        # fallback: попробуем из переменной RENDER_EXTERNAL_URL
+        external_url = os.environ.get("RENDER_EXTERNAL_URL")
+        if external_url:
+            webhook_url = f"{external_url}/webhook"
+        else:
+            # Если локально, то используем ngrok или localhost (но для Render должно быть)
+            logging.warning("RENDER_EXTERNAL_HOSTNAME не задан, используем localhost (не для продакшена)")
+            webhook_url = "https://bunker-bot-xkps.onrender.com/webhook"  # замените на ваш реальный URL, если не работает
+    else:
+        webhook_url = f"https://{external_host}/webhook"
+
+    await bot.delete_webhook(drop_pending_updates=True)
+    await bot.set_webhook(url=webhook_url)
+    logging.info(f"Вебхук установлен на {webhook_url}")
+
+# ---------- Главный запуск ----------
+async def main():
     init_db()
     logging.info("Бот BUNKER запущен")
+    # Устанавливаем вебхук
+    await set_webhook()
+    # Запускаем планировщик напоминаний (работает в фоне)
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         send_reminders,
@@ -921,8 +936,18 @@ async def run_bot():
     )
     scheduler.start()
     logging.info("Планировщик напоминаний запущен")
-    await dp.start_polling(bot)
+    # Держим приложение (Flask) работающим, но мы уже в другом потоке
+    # Нам нужно запустить Flask сервер, но в этом же потоке он будет блокировать.
+    # Поэтому запустим Flask в отдельном потоке, а здесь оставим только ожидание.
+    # Вместо этого мы запустим Flask в главном потоке (через app.run), а бота отдельно,
+    # но проще запустить Flask в отдельном потоке, а здесь сделать бесконечный цикл.
+    # Но в Render нам нужно, чтобы основной процесс был занят.
+    # Поэтому мы не будем запускать Flask здесь, а оставим его на уровне __main__.
+    # Вместо этого мы просто завершим эту функцию.
+    # Но нам нужно держать процесс живым, поэтому мы будем ждать вечно.
+    await asyncio.Event().wait()  # бесконечное ожидание
 
+# ---------- Запуск Flask в отдельном потоке ----------
 def run_flask():
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, use_reloader=False)
@@ -931,6 +956,5 @@ if __name__ == "__main__":
     # Запускаем Flask в отдельном потоке
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    
-    # Запускаем бота в основном потоке
-    asyncio.run(run_bot())
+    # Запускаем основную асинхронную функцию (вебхук + планировщик)
+    asyncio.run(main())
