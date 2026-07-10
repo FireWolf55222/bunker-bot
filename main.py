@@ -378,9 +378,8 @@ async def cmd_start(message: types.Message, state: FSMContext):
         "• 🧽 Полировка\n"
         "• 🧹 Химчистка\n"
         "• 🪟 Тонировка\n\n"
-        "📍 <b>Адрес:</b> ул. Автомобильная, 123\n"
-        "📞 <b>Телефон:</b> <a href='tel:+71234567890'>+7 (123) 456-78-90</a>\n"
-        "📸 <b>Instagram:</b> @bunker_detailing\n\n"
+        "📍 <b>Адрес:</b> Тюмень, ул. Сиреневая, 25\n"
+        "📞 <b>Телефон:</b> <a href='tel:+79222220572'>+7 (922) 222-05-72</a>\n"
         "👇 Нажмите, чтобы записаться"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
