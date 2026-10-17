@@ -43,8 +43,6 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 PERSONAL_LINK = os.getenv("PERSONAL_LINK", "https://t.me/your_username")
-
-# Render передаст этот URL после первого деплоя
 BASE_URL = os.getenv("BASE_URL", "").strip().rstrip("/")
 
 if not BOT_TOKEN:
@@ -116,12 +114,15 @@ IMAGE_META = {
 }
 
 
-# ---------- Вспомогательные функции отрисовки (без изменений) ----------
+# ---------- Вспомогательные функции отрисовки ----------
 def _hex(h: str) -> tuple[int, int, int]:
+    """'#RRGGBB' → (r, g, b)."""
     h = h.lstrip("#")
     return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
 
+
 def _load_font(size: int, bold: bool = False):
+    """Подбирает системный шрифт."""
     names = (["segoeuib.ttf", "arialbd.ttf", "calibrib.ttf"] if bold
              else ["segoeui.ttf", "arial.ttf", "calibri.ttf"])
     for n in names:
@@ -131,15 +132,19 @@ def _load_font(size: int, bold: bool = False):
             continue
     return ImageFont.load_default()
 
+
 def _text_w(draw, text: str, font) -> int:
     bbox = draw.textbbox((0, 0), text, font=font)
     return bbox[2] - bbox[0]
+
 
 def _draw_center(draw, text: str, font, fill, cx: int, y: int) -> None:
     w = _text_w(draw, text, font)
     draw.text((cx - w // 2, y), text, font=font, fill=fill)
 
-def _draw_tracked_center(draw, text: str, font, fill, cx: int, y: int, tracking: int = 8) -> None:
+
+def _draw_tracked_center(draw, text: str, font, fill, cx: int, y: int,
+                         tracking: int = 8) -> None:
     widths = [_text_w(draw, ch, font) for ch in text]
     total = sum(widths) + tracking * (len(text) - 1)
     x = cx - total // 2
@@ -147,7 +152,9 @@ def _draw_tracked_center(draw, text: str, font, fill, cx: int, y: int, tracking:
         draw.text((x, y), ch, font=font, fill=fill)
         x += w + tracking
 
-def _fit_font(draw, text: str, max_width: int, start_size: int, bold: bool = True, min_size: int = 24):
+
+def _fit_font(draw, text: str, max_width: int, start_size: int,
+              bold: bool = True, min_size: int = 24):
     size = start_size
     while size > min_size:
         font = _load_font(size, bold)
@@ -156,21 +163,27 @@ def _fit_font(draw, text: str, max_width: int, start_size: int, bold: bool = Tru
         size -= 4
     return _load_font(min_size, bold)
 
-def _glow(img, cx: int, cy: int, radius: int, color: tuple[int, int, int], alpha: int = 120) -> None:
+
+def _glow(img, cx: int, cy: int, radius: int,
+          color: tuple[int, int, int], alpha: int = 120) -> None:
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
     od = ImageDraw.Draw(overlay)
-    od.ellipse([cx - radius, cy - radius, cx + radius, cy + radius], fill=(*color, alpha))
+    od.ellipse([cx - radius, cy - radius, cx + radius, cy + radius],
+               fill=(*color, alpha))
     overlay = overlay.filter(ImageFilter.GaussianBlur(radius // 3))
     img.alpha_composite(overlay)
+
 
 def _blend_rect(img, rect, radius: int, fill_rgba, outline_rgba=None) -> None:
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
     od = ImageDraw.Draw(overlay)
     if outline_rgba:
-        od.rounded_rectangle(rect, radius=radius, fill=fill_rgba, outline=outline_rgba, width=1)
+        od.rounded_rectangle(rect, radius=radius,
+                             fill=fill_rgba, outline=outline_rgba, width=1)
     else:
         od.rounded_rectangle(rect, radius=radius, fill=fill_rgba)
     img.alpha_composite(overlay)
+
 
 def _gradient_bg(W: int, H: int, top: tuple, bottom: tuple) -> Image.Image:
     img = Image.new("RGB", (W, H))
@@ -183,15 +196,21 @@ def _gradient_bg(W: int, H: int, top: tuple, bottom: tuple) -> Image.Image:
         d.line([(0, y), (W, y)], fill=(r, g, b))
     return img
 
+
 def _draw_logo_mark(draw, x: int, y: int, size: int, accent) -> None:
-    draw.rounded_rectangle([x, y, x + size, y + size], radius=size // 4, fill=accent)
+    draw.rounded_rectangle([x, y, x + size, y + size],
+                           radius=size // 4, fill=accent)
     font = _load_font(int(size * 0.55), bold=True)
     bbox = draw.textbbox((0, 0), "S", font=font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    draw.text((x + (size - tw) // 2, y + (size - th) // 2 - bbox[1]), "S", font=font, fill=(255, 255, 255))
+    draw.text((x + (size - tw) // 2, y + (size - th) // 2 - bbox[1]),
+              "S", font=font, fill=(255, 255, 255))
+
 
 def _draw_chip(img, draw, x: int, y: int, text: str, font,
-               text_color=(255, 255, 255), bg_rgba=(255, 255, 255, 26), border_rgba=(255, 255, 255, 60)) -> int:
+               text_color=(255, 255, 255),
+               bg_rgba=(255, 255, 255, 26),
+               border_rgba=(255, 255, 255, 60)) -> int:
     pad_x, pad_y = 22, 14
     bbox = draw.textbbox((0, 0), text, font=font)
     tw = bbox[2] - bbox[0]
@@ -200,10 +219,13 @@ def _draw_chip(img, draw, x: int, y: int, text: str, font,
     h = th + pad_y * 2
     rect = [x, y, x + w, y + h]
     _blend_rect(img, rect, h // 2, bg_rgba, border_rgba)
-    draw.text((x + pad_x, y + pad_y - bbox[1]), text, font=font, fill=text_color)
+    draw.text((x + pad_x, y + pad_y - bbox[1]),
+              text, font=font, fill=text_color)
     return w
 
-def _draw_chips_row(img, draw, chips: list[str], cx: int, y: int, font_size: int = 22, gap: int = 14) -> None:
+
+def _draw_chips_row(img, draw, chips: list[str], cx: int, y: int,
+                    font_size: int = 22, gap: int = 14) -> None:
     max_w = img.width - 100
     size = font_size
     while size > 14:
@@ -224,12 +246,17 @@ def _draw_chips_row(img, draw, chips: list[str], cx: int, y: int, font_size: int
         _draw_chip(img, draw, x, y, c, font)
         x += w + gap
 
-def _draw_stat(draw, cx: int, y: int, value: str, label: str, f_val, f_lbl, accent, secondary) -> None:
+
+def _draw_stat(draw, cx: int, y: int, value: str, label: str,
+               f_val, f_lbl, accent, secondary) -> None:
     _draw_center(draw, value, f_val, accent, cx, y)
     _draw_center(draw, label, f_lbl, secondary, cx, y + 76)
 
-def _make_placeholder(path: str, title: str, subtitle: str = "", *, badge: str | None = None,
-                      stats: list[tuple[str, str]] | None = None, chips: list[str] | None = None,
+
+def _make_placeholder(path: str, title: str, subtitle: str = "", *,
+                      badge: str | None = None,
+                      stats: list[tuple[str, str]] | None = None,
+                      chips: list[str] | None = None,
                       size: tuple[int, int] = (1280, 720)) -> None:
     W, H = size
     accent1   = _hex("#6366F1")
@@ -256,7 +283,8 @@ def _make_placeholder(path: str, title: str, subtitle: str = "", *, badge: str |
         bw   = _text_w(draw, badge, f_b) + 32
         bh   = 40
         bx   = W - 48 - bw
-        _blend_rect(img, [bx, 48, bx + bw, 48 + bh], 20, (99, 102, 241, 80), (99, 102, 241, 150))
+        _blend_rect(img, [bx, 48, bx + bw, 48 + bh], 20,
+                    (99, 102, 241, 80), (99, 102, 241, 150))
         draw.text((bx + 16, 48 + 9), badge, font=f_b, fill=white)
 
     title_txt = title if badge else title.upper()
@@ -265,11 +293,13 @@ def _make_placeholder(path: str, title: str, subtitle: str = "", *, badge: str |
     if badge:
         _draw_center(draw, title_txt, f_title, white, W // 2, y_title)
     else:
-        _draw_tracked_center(draw, title_txt, f_title, white, W // 2, y_title, tracking=8)
+        _draw_tracked_center(draw, title_txt, f_title, white,
+                             W // 2, y_title, tracking=8)
 
     if subtitle:
         f_sub = _load_font(32)
-        _draw_center(draw, subtitle, f_sub, secondary, W // 2, y_title + 110)
+        _draw_center(draw, subtitle, f_sub, secondary,
+                     W // 2, y_title + 110)
 
     if stats:
         f_val = _load_font(58, bold=True)
@@ -277,7 +307,8 @@ def _make_placeholder(path: str, title: str, subtitle: str = "", *, badge: str |
         y_stat = H // 2 + 70
         step   = W // (len(stats) + 1)
         for i, (v, l) in enumerate(stats):
-            _draw_stat(draw, step * (i + 1), y_stat, v, l, f_val, f_lbl, accent2, secondary)
+            _draw_stat(draw, step * (i + 1), y_stat, v, l,
+                       f_val, f_lbl, accent2, secondary)
 
     if chips:
         _draw_chips_row(img, draw, chips, W // 2, H - 110)
@@ -285,7 +316,9 @@ def _make_placeholder(path: str, title: str, subtitle: str = "", *, badge: str |
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     img.convert("RGB").save(path, "JPEG", quality=92)
 
+
 def ensure_images() -> None:
+    """Генерирует заглушки для отсутствующих изображений."""
     if not PILLOW_OK:
         log.warning("Pillow не установлен — автогенерация заглушек пропущена.")
         return
@@ -321,13 +354,16 @@ def init_db() -> None:
     conn.commit()
     conn.close()
 
-def save_lead(tg_id: int, username: str, niche: str, channels: str, speed: str, contact: str) -> int:
+
+def save_lead(tg_id: int, username: str, niche: str,
+              channels: str, speed: str, contact: str) -> int:
     conn = sqlite3.connect("leads.db")
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO leads (tg_id, username, niche, channels, speed, contact, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (tg_id, username, niche, channels, speed, contact, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    """, (tg_id, username, niche, channels, speed, contact,
+          datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     lead_id = cur.lastrowid
     conn.commit()
     conn.close()
@@ -347,9 +383,15 @@ class AuditFSM(StatesGroup):
 # ============================================================
 # Утилита: безопасная отправка фото
 # ============================================================
-async def safe_send_photo(chat_id: int, path: str, caption: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:
+async def safe_send_photo(chat_id: int, path: str, caption: str,
+                          reply_markup: InlineKeyboardMarkup | None = None) -> None:
     if os.path.exists(path):
-        await bot.send_photo(chat_id=chat_id, photo=FSInputFile(path), caption=caption, reply_markup=reply_markup)
+        await bot.send_photo(
+            chat_id=chat_id,
+            photo=FSInputFile(path),
+            caption=caption,
+            reply_markup=reply_markup,
+        )
     else:
         log.warning(f"Файл {path} не найден, отправляю текст.")
         await bot.send_message(chat_id, caption, reply_markup=reply_markup)
@@ -369,10 +411,12 @@ def main_menu_kb() -> InlineKeyboardMarkup:
     kb.adjust(1, 1, 1, 1, 1, 1)
     return kb.as_markup()
 
+
 def back_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="⬅️ Назад", callback_data="menu:back")
     return kb.as_markup()
+
 
 def services_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
@@ -385,6 +429,7 @@ def services_kb() -> InlineKeyboardMarkup:
     kb.adjust(1, 1, 1, 1, 1, 1)
     return kb.as_markup()
 
+
 def cases_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="🏢 Агентство недвижимости", callback_data="case:1")
@@ -394,12 +439,14 @@ def cases_kb() -> InlineKeyboardMarkup:
     kb.adjust(1, 1, 1, 1)
     return kb.as_markup()
 
+
 def pricing_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="🚀 Обсудить тариф", url=PERSONAL_LINK)
     kb.button(text="⬅️ Назад", callback_data="menu:back")
     kb.adjust(1, 1)
     return kb.as_markup()
+
 
 def cancel_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
@@ -408,7 +455,7 @@ def cancel_kb() -> InlineKeyboardMarkup:
 
 
 # ============================================================
-# Хендлеры (без изменений, для краткости показаны ключевые)
+# /start
 # ============================================================
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
@@ -426,11 +473,16 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     )
     await safe_send_photo(message.chat.id, IMG_WELCOME, caption, main_menu_kb())
 
+
 @router.message(Command("menu"))
 async def cmd_menu(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer("🏠 <b>Главное меню</b>", reply_markup=main_menu_kb())
 
+
+# ============================================================
+# Возврат в главное меню
+# ============================================================
 @router.callback_query(F.data == "menu:back")
 async def back_to_menu(call: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
@@ -438,10 +490,17 @@ async def back_to_menu(call: CallbackQuery, state: FSMContext) -> None:
         await call.message.delete()
     except Exception:
         pass
-    caption = "🏠 <b>Главное меню</b>\n\nВыберите интересующий раздел 👇"
+    caption = (
+        "🏠 <b>Главное меню</b>\n\n"
+        "Выберите интересующий раздел 👇"
+    )
     await safe_send_photo(call.message.chat.id, IMG_WELCOME, caption, main_menu_kb())
     await call.answer()
 
+
+# ============================================================
+# Раздел «Обо мне»
+# ============================================================
 @router.callback_query(F.data == "menu:about")
 async def about(call: CallbackQuery) -> None:
     text = (
@@ -466,9 +525,16 @@ async def about(call: CallbackQuery) -> None:
     await safe_send_photo(call.message.chat.id, IMG_ABOUT, text, back_kb())
     await call.answer()
 
+
+# ============================================================
+# Раздел «Что я делаю»
+# ============================================================
 @router.callback_query(F.data == "menu:services")
 async def services(call: CallbackQuery) -> None:
-    text = "🛠 <b>Что я делаю</b>\n\nВыберите услугу, чтобы узнать подробнее 👇"
+    text = (
+        "🛠 <b>Что я делаю</b>\n\n"
+        "Выберите услугу, чтобы узнать подробнее 👇"
+    )
     try:
         await call.message.delete()
     except Exception:
@@ -476,13 +542,57 @@ async def services(call: CallbackQuery) -> None:
     await bot.send_message(call.message.chat.id, text, reply_markup=services_kb())
     await call.answer()
 
+
 SERVICES = {
-    "1": "🤖 <b>Telegram-боты для обработки заявок</b>\n\nРазрабатываю боты, которые принимают заявки 24/7, квалифицируют клиента, отправляют уведомления менеджерам и автоматически создают сделки в CRM.\n\n✅ <b>Что получите:</b>\n• Приём заявок без задержек\n• Автоквалификация клиента\n• Мгновенные уведомления\n• Полная статистика по заявкам",
-    "2": "🧠 <b>AI-агенты (YandexGPT / GigaChat)</b>\n\nУмные ассистенты, которые ведут первичный диалог с клиентом, отвечают на вопросы, бронируют время и передают горячих лидов менеджеру.\n\n✅ <b>Что получите:</b>\n• Ответы клиентам 24/7\n• Снижение нагрузки на менеджеров\n• Рост конверсии в диалоге",
-    "3": "🔀 <b>Конвейеры заявок → CRM</b>\n\nОбъединяю все источники заявок в единую систему: <b>сайт, WhatsApp, Instagram, Авито</b> → <b>CRM</b>.\n\n✅ <b>Что получите:</b>\n• Ни одна заявка не теряется\n• Единое окно для менеджеров\n• Автоматическая постановка задач",
-    "4": "🔥 <b>Автопрогрев и возврат «спящих» клиентов</b>\n\nНастраиваю сценарии касаний: поздравления, акции, персональные напоминания. Возвращаю тех, кто «остыл».\n\n✅ <b>Что получите:</b>\n• Реактивация базы\n• Дополнительные сделки из старой базы\n• Рост LTV клиента",
-    "5": "📊 <b>Финансовые дашборды</b>\n\nСобираю дашборды по выручке, каналам и конверсии. Все ключевые метрики — в одном окне, всегда под рукой.\n\n✅ <b>Что получите:</b>\n• Прозрачные показатели\n• Решения на основе данных\n• Контроль каждого канала",
+    "1": (
+        "🤖 <b>Telegram-боты для обработки заявок</b>\n\n"
+        "Разрабатываю боты, которые принимают заявки 24/7, "
+        "квалифицируют клиента, отправляют уведомления менеджерам "
+        "и автоматически создают сделки в CRM.\n\n"
+        "✅ <b>Что получите:</b>\n"
+        "• Приём заявок без задержек\n"
+        "• Автоквалификация клиента\n"
+        "• Мгновенные уведомления\n"
+        "• Полная статистика по заявкам"
+    ),
+    "2": (
+        "🧠 <b>AI-агенты (YandexGPT / GigaChat)</b>\n\n"
+        "Умные ассистенты, которые ведут первичный диалог с клиентом, "
+        "отвечают на вопросы, бронируют время и передают горячих лидов менеджеру.\n\n"
+        "✅ <b>Что получите:</b>\n"
+        "• Ответы клиентам 24/7\n"
+        "• Снижение нагрузки на менеджеров\n"
+        "• Рост конверсии в диалоге"
+    ),
+    "3": (
+        "🔀 <b>Конвейеры заявок → CRM</b>\n\n"
+        "Объединяю все источники заявок в единую систему: "
+        "<b>сайт, WhatsApp, Instagram, Авито</b> → <b>CRM</b>.\n\n"
+        "✅ <b>Что получите:</b>\n"
+        "• Ни одна заявка не теряется\n"
+        "• Единое окно для менеджеров\n"
+        "• Автоматическая постановка задач"
+    ),
+    "4": (
+        "🔥 <b>Автопрогрев и возврат «спящих» клиентов</b>\n\n"
+        "Настраиваю сценарии касаний: поздравления, акции, "
+        "персональные напоминания. Возвращаю тех, кто «остыл».\n\n"
+        "✅ <b>Что получите:</b>\n"
+        "• Реактивация базы\n"
+        "• Дополнительные сделки из старой базы\n"
+        "• Рост LTV клиента"
+    ),
+    "5": (
+        "📊 <b>Финансовые дашборды</b>\n\n"
+        "Собираю дашборды по выручке, каналам и конверсии. "
+        "Все ключевые метрики — в одном окне, всегда под рукой.\n\n"
+        "✅ <b>Что получите:</b>\n"
+        "• Прозрачные показатели\n"
+        "• Решения на основе данных\n"
+        "• Контроль каждого канала"
+    ),
 }
+
 
 @router.callback_query(F.data.startswith("srv:"))
 async def service_detail(call: CallbackQuery) -> None:
@@ -499,9 +609,16 @@ async def service_detail(call: CallbackQuery) -> None:
     await bot.send_message(call.message.chat.id, text, reply_markup=kb.as_markup())
     await call.answer()
 
+
+# ============================================================
+# Раздел «Кейсы»
+# ============================================================
 @router.callback_query(F.data == "menu:cases")
 async def cases(call: CallbackQuery) -> None:
-    text = "📈 <b>Кейсы</b>\n\nВыберите кейс, чтобы увидеть детали: проблема → решение → результат 👇"
+    text = (
+        "📈 <b>Кейсы</b>\n\n"
+        "Выберите кейс, чтобы увидеть детали: проблема → решение → результат 👇"
+    )
     try:
         await call.message.delete()
     except Exception:
@@ -509,11 +626,59 @@ async def cases(call: CallbackQuery) -> None:
     await bot.send_message(call.message.chat.id, text, reply_markup=cases_kb())
     await call.answer()
 
+
 CASES = {
-    "1": {"img": IMG_CASE_1, "text": "🏢 <b>Кейс №1. Агентство недвижимости (Казань)</b>\n\n❗️<b>Проблема:</b>\nМенеджеры отвечали на заявки в среднем <b>40 минут</b>. Клиенты уходили к конкурентам, конверсия падала.\n\n🛠 <b>Решение:</b>\nВнедрили Telegram-бота с AI-агентом на YandexGPT. Бот отвечает мгновенно, квалифицирует клиента и передаёт горячих лидов менеджеру.\n\n📊 <b>Результат:</b>\n• Время ответа: <b>40 минут → 3 секунды</b>\n• Просмотры объектов: <b>+30%</b>\n• Рост конверсии в показ: <b>+22%</b>"},
-    "2": {"img": IMG_CASE_2, "text": "🚗 <b>Кейс №2. Детейлинг-центр</b>\n\n❗️<b>Проблема:</b>\nЗаписи велись вручную в WhatsApp. Постоянные накладки, двойные брони, потерянные клиенты.\n\n🛠 <b>Решение:</b>\nРазработали Telegram-бота для онлайн-записи с интеграцией в календарь + финансовый дашборд по услугам и мастерам.\n\n📊 <b>Результат:</b>\n• Загрузка мастеров: <b>+35%</b>\n• Накладки броней: <b>0</b>\n• Выручка видна в реальном времени"},
-    "3": {"img": IMG_CASE_3, "text": "🏗 <b>Кейс №3. Застройщик</b>\n\n❗️<b>Проблема:</b>\nЗаявки приходили из 5 источников (сайт, Авито, Instagram, звонки, рекомендации). Половина терялась, лиды «остывали».\n\n🛠 <b>Решение:</b>\nСобрали единый конвейер заявок в CRM + запустили автопрогрев «спящих» клиентов через Telegram-бота.\n\n📊 <b>Результат:</b>\n• Потерянных заявок: <b>0</b>\n• Возврат «спящих»: <b>+18% сделок</b>\n• Прозрачная аналитика по всем каналам"},
+    "1": {
+        "img": IMG_CASE_1,
+        "text": (
+            "🏢 <b>Кейс №1. Агентство недвижимости (Казань)</b>\n\n"
+            "❗️<b>Проблема:</b>\n"
+            "Менеджеры отвечали на заявки в среднем <b>40 минут</b>. "
+            "Клиенты уходили к конкурентам, конверсия падала.\n\n"
+            "🛠 <b>Решение:</b>\n"
+            "Внедрили Telegram-бота с AI-агентом на YandexGPT. "
+            "Бот отвечает мгновенно, квалифицирует клиента и передаёт "
+            "горячих лидов менеджеру.\n\n"
+            "📊 <b>Результат:</b>\n"
+            "• Время ответа: <b>40 минут → 3 секунды</b>\n"
+            "• Просмотры объектов: <b>+30%</b>\n"
+            "• Рост конверсии в показ: <b>+22%</b>"
+        ),
+    },
+    "2": {
+        "img": IMG_CASE_2,
+        "text": (
+            "🚗 <b>Кейс №2. Детейлинг-центр</b>\n\n"
+            "❗️<b>Проблема:</b>\n"
+            "Записи велись вручную в WhatsApp. Постоянные накладки, "
+            "двойные брони, потерянные клиенты.\n\n"
+            "🛠 <b>Решение:</b>\n"
+            "Разработали Telegram-бота для онлайн-записи с интеграцией "
+            "в календарь + финансовый дашборд по услугам и мастерам.\n\n"
+            "📊 <b>Результат:</b>\n"
+            "• Загрузка мастеров: <b>+35%</b>\n"
+            "• Накладки броней: <b>0</b>\n"
+            "• Выручка видна в реальном времени"
+        ),
+    },
+    "3": {
+        "img": IMG_CASE_3,
+        "text": (
+            "🏗 <b>Кейс №3. Застройщик</b>\n\n"
+            "❗️<b>Проблема:</b>\n"
+            "Заявки приходили из 5 источников (сайт, Авито, Instagram, "
+            "звонки, рекомендации). Половина терялась, лиды «остывали».\n\n"
+            "🛠 <b>Решение:</b>\n"
+            "Собрали единый конвейер заявок в CRM + запустили автопрогрев "
+            "«спящих» клиентов через Telegram-бота.\n\n"
+            "📊 <b>Результат:</b>\n"
+            "• Потерянных заявок: <b>0</b>\n"
+            "• Возврат «спящих»: <b>+18% сделок</b>\n"
+            "• Прозрачная аналитика по всем каналам"
+        ),
+    },
 }
+
 
 @router.callback_query(F.data.startswith("case:"))
 async def case_detail(call: CallbackQuery) -> None:
@@ -533,15 +698,40 @@ async def case_detail(call: CallbackQuery) -> None:
     await safe_send_photo(call.message.chat.id, data["img"], data["text"], kb.as_markup())
     await call.answer()
 
+
+# ============================================================
+# Раздел «Тарифы»
+# ============================================================
 @router.callback_query(F.data == "menu:pricing")
 async def pricing(call: CallbackQuery) -> None:
     text = (
         "💼 <b>Тарифы Stryx Automation</b>\n\n"
         "Выберите подходящий формат сотрудничества.\n"
         "Все тарифы — <i>под ключ</i>, с поддержкой после запуска.\n\n"
-        "🚀 <b>«Старт» — 25 000 ₽</b>\n<i>Для первого шага в автоматизации</i>\n• Telegram-бот для приёма заявок\n• Уведомления менеджеру\n• Базовая аналитика\n• Срок: 5–7 дней\n\n"
-        "💎 <b>«Бизнес» — 45 000 ₽</b>\n<i>Оптимально для растущего бизнеса</i>\n• Всё из «Старт»\n• AI-агент на YandexGPT/GigaChat\n• Интеграция с CRM (amoCRM/Bitrix24)\n• Конвейер из 2–3 источников заявок\n• Срок: 10–14 дней\n\n"
-        "👑 <b>«Премиум» — 70 000 ₽</b>\n<i>Максимальная автоматизация</i>\n• Всё из «Бизнес»\n• Конвейер из всех источников (сайт, WhatsApp, Instagram, Авито)\n• Автопрогрев и возврат «спящих» клиентов\n• Финансовый дашборд\n• 1 месяц поддержки включён\n• Срок: 3–4 недели\n\n"
+
+        "🚀 <b>«Старт» — 25 000 ₽</b>\n"
+        "<i>Для первого шага в автоматизации</i>\n"
+        "• Telegram-бот для приёма заявок\n"
+        "• Уведомления менеджеру\n"
+        "• Базовая аналитика\n"
+        "• Срок: 5–7 дней\n\n"
+
+        "💎 <b>«Бизнес» — 45 000 ₽</b>\n"
+        "<i>Оптимально для растущего бизнеса</i>\n"
+        "• Всё из «Старт»\n"
+        "• AI-агент на YandexGPT/GigaChat\n"
+        "• Интеграция с CRM (amoCRM/Bitrix24)\n"
+        "• Конвейер из 2–3 источников заявок\n"
+        "• Срок: 10–14 дней\n\n"
+
+        "👑 <b>«Премиум» — 70 000 ₽</b>\n"
+        "<i>Максимальная автоматизация</i>\n"
+        "• Всё из «Бизнес»\n"
+        "• Конвейер из всех источников (сайт, WhatsApp, Instagram, Авито)\n"
+        "• Автопрогрев и возврат «спящих» клиентов\n"
+        "• Финансовый дашборд\n"
+        "• 1 месяц поддержки включён\n"
+        "• Срок: 3–4 недели\n\n"
         "👇 Нажмите кнопку ниже, чтобы обсудить детали."
     )
     try:
@@ -551,6 +741,10 @@ async def pricing(call: CallbackQuery) -> None:
     await bot.send_message(call.message.chat.id, text, reply_markup=pricing_kb())
     await call.answer()
 
+
+# ============================================================
+# Бесплатный аудит (FSM)
+# ============================================================
 @router.callback_query(F.data == "menu:audit")
 async def audit_start(call: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
@@ -570,28 +764,45 @@ async def audit_start(call: CallbackQuery, state: FSMContext) -> None:
     await bot.send_message(call.message.chat.id, text, reply_markup=cancel_kb())
     await call.answer()
 
+
 @router.message(AuditFSM.niche)
 async def audit_niche(message: Message, state: FSMContext) -> None:
     await state.update_data(niche=message.text.strip())
     await state.set_state(AuditFSM.channels)
-    await message.answer("2️⃣ <b>Откуда к вам приходят заявки?</b>\nПеречислите каналы: сайт, WhatsApp, Instagram, Авито, звонки...", reply_markup=cancel_kb())
+    await message.answer(
+        "2️⃣ <b>Откуда к вам приходят заявки?</b>\n"
+        "Перечислите каналы: сайт, WhatsApp, Instagram, Авито, звонки...",
+        reply_markup=cancel_kb(),
+    )
+
 
 @router.message(AuditFSM.channels)
 async def audit_channels(message: Message, state: FSMContext) -> None:
     await state.update_data(channels=message.text.strip())
     await state.set_state(AuditFSM.speed)
-    await message.answer("3️⃣ <b>Как быстро вы отвечаете на заявку в среднем?</b>\nНапример: «сразу», «10 минут», «2 часа», «иногда забываем».", reply_markup=cancel_kb())
+    await message.answer(
+        "3️⃣ <b>Как быстро вы отвечаете на заявку в среднем?</b>\n"
+        "Например: «сразу», «10 минут», «2 часа», «иногда забываем».",
+        reply_markup=cancel_kb(),
+    )
+
 
 @router.message(AuditFSM.speed)
 async def audit_speed(message: Message, state: FSMContext) -> None:
     await state.update_data(speed=message.text.strip())
     await state.set_state(AuditFSM.contact)
-    await message.answer("4️⃣ <b>Куда прислать разбор?</b>\nОставьте Telegram-юзернейм или телефон для связи.", reply_markup=cancel_kb())
+    await message.answer(
+        "4️⃣ <b>Куда прислать разбор?</b>\n"
+        "Оставьте Telegram-юзернейм или телефон для связи.",
+        reply_markup=cancel_kb(),
+    )
+
 
 @router.message(AuditFSM.contact)
 async def audit_contact(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     await state.clear()
+
     user = message.from_user
     lead_id = save_lead(
         tg_id=user.id,
@@ -601,6 +812,7 @@ async def audit_contact(message: Message, state: FSMContext) -> None:
         speed=data.get("speed", "—"),
         contact=message.text.strip(),
     )
+
     await message.answer(
         "✅ <b>Спасибо! Заявка принята.</b>\n\n"
         "Мы изучим ваш запрос и вернёмся с персональным разбором "
@@ -611,6 +823,7 @@ async def audit_contact(message: Message, state: FSMContext) -> None:
             [InlineKeyboardButton(text="⬅️ В главное меню", callback_data="menu:back")],
         ]),
     )
+
     admin_text = (
         "🔔 <b>НОВАЯ ЗАЯВКА НА АУДИТ</b>\n\n"
         f"🆔 <b>Lead ID:</b> {lead_id}\n"
@@ -627,6 +840,7 @@ async def audit_contact(message: Message, state: FSMContext) -> None:
     except Exception as e:
         log.error(f"Не удалось отправить уведомление админу: {e}")
 
+
 @router.callback_query(F.data == "audit:cancel")
 async def audit_cancel(call: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
@@ -634,22 +848,34 @@ async def audit_cancel(call: CallbackQuery, state: FSMContext) -> None:
         await call.message.delete()
     except Exception:
         pass
-    await bot.send_message(call.message.chat.id, "❌ Аудит отменён. Если захотите — вернёмся в любой момент.", reply_markup=main_menu_kb())
+    await bot.send_message(
+        call.message.chat.id,
+        "❌ Аудит отменён. Если захотите — вернёмся в любой момент.",
+        reply_markup=main_menu_kb(),
+    )
     await call.answer()
 
+
+# ============================================================
+# Заглушка для прочих сообщений
+# ============================================================
 @router.message()
 async def fallback(message: Message, state: FSMContext) -> None:
     if await state.get_state() is not None:
         return
-    await message.answer("🤖 Чтобы начать — нажмите /start или выберите пункт меню.", reply_markup=main_menu_kb())
+    await message.answer(
+        "🤖 Чтобы начать — нажмите /start или выберите пункт меню.",
+        reply_markup=main_menu_kb(),
+    )
 
 
 # ============================================================
-# Точка входа: WEBHOOK для Render
+# WEBHOOK для Render
 # ============================================================
 async def healthcheck(request: web.Request) -> web.Response:
-    """Эндпоинт для cron-job.org, чтобы Render не засыпал."""
+    """Эндпоинт для UptimeRobot / cron-job.org — чтобы Render не засыпал."""
     return web.Response(text="OK")
+
 
 async def on_startup(bot: Bot) -> None:
     """Устанавливает webhook при старте сервера."""
@@ -657,25 +883,29 @@ async def on_startup(bot: Bot) -> None:
         log.warning("BASE_URL не задан. Webhook не будет установлен.")
         return
     webhook_url = f"{BASE_URL}/webhook"
-    await bot.set_webhook(webhook_url)
+    await bot.set_webhook(webhook_url, drop_pending_updates=True)
     log.info(f"Webhook установлен: {webhook_url}")
+
 
 def main() -> None:
     """Запускает aiohttp-сервер для webhook."""
     init_db()
     ensure_images()
 
+    # Регистрируем on_startup в диспетчере (правильный способ для aiogram 3)
+    dp.startup.register(on_startup)
+
     app = web.Application()
 
-    # /health — для cron-job.org
+    # /health — для UptimeRobot
     app.router.add_get("/health", healthcheck)
 
     # Webhook-обработчик aiogram
     webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     webhook_handler.register(app, path="/webhook")
 
-    # Хуки старта/остановки
-    setup_application(app, dp, bot=bot, on_startup=on_startup)
+    # Настраиваем жизненный цикл aiohttp и диспетчера
+    setup_application(app, dp, bot=bot)
 
     # Render передаёт порт в переменной PORT
     port = int(os.getenv("PORT", 10000))
