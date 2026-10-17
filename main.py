@@ -1,954 +1,689 @@
+# -*- coding: utf-8 -*-
+"""
+Бот-визитка Stryx Automation.
+Стек: aiogram 3.x, FSM, SQLite, Pillow, aiohttp (webhook для Render).
+"""
+
 import asyncio
 import logging
-import sqlite3
-import html
 import os
-import threading
-from datetime import datetime, timedelta
-from os import getenv, path
+import sqlite3
+from datetime import datetime
 
-import aiohttp  # Добавлено для keepalive
-from flask import Flask, send_file
-from aiogram import Bot, Dispatcher, Router, types
-from aiogram.filters import Command
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    ReplyKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardRemove,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
+    Message,
     CallbackQuery,
     FSInputFile,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
 )
-from aiogram_calendar import SimpleCalendar, SimpleCalendarCallback
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.interval import IntervalTrigger
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
 
+# ---------- Pillow для автогенерации заглушек ----------
+try:
+    from PIL import Image, ImageDraw, ImageFont, ImageFilter
+    PILLOW_OK = True
+except ImportError:
+    PILLOW_OK = False
+
+# ---------- aiohttp для webhook-сервера ----------
+from aiohttp import web
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+
+
+# ---------- Загрузка переменных окружения ----------
 load_dotenv()
-BOT_TOKEN = getenv("BOT_TOKEN")
-MANAGER_ID = getenv("MANAGER_ID")
-if not BOT_TOKEN or not MANAGER_ID:
-    raise ValueError("Не заданы BOT_TOKEN или MANAGER_ID в .env")
-MANAGER_ID = int(MANAGER_ID)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+PERSONAL_LINK = os.getenv("PERSONAL_LINK", "https://t.me/your_username")
 
-logging.basicConfig(level=logging.INFO)
+# Render передаст этот URL после первого деплоя
+BASE_URL = os.getenv("BASE_URL", "").strip().rstrip("/")
 
-DB_NAME = "bunker_requests.db"
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN не задан в .env")
 
-# ---------- Услуги и параметры ----------
-SERVICES = {
-    "Полировка": {
-        "Лёгкая": {"duration": 3, "requires_time": False},
-        "Глубокая": {"duration": 48, "requires_time": False}
-    },
-    "Химчистка": {
-        "Без разбора": {"duration": 48, "requires_time": False},
-        "С разбором": {"duration": 48, "requires_time": False}
-    },
-    "Тонировка": {
-        "Передняя полусфера": {"duration": 2, "requires_time": True},
-        "Задняя полусфера": {"duration": 2.5, "requires_time": True}
-    }
-}
 
-WORK_START_HOUR = 10
-WORK_END_HOUR = 22
-SLOT_INTERVAL = 30
-
-def get_service_params(category, subcategory):
-    return SERVICES.get(category, {}).get(subcategory, {"duration": 1, "requires_time": False})
-
-# ---------- База данных ----------
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            username TEXT,
-            service_category TEXT,
-            service_subcategory TEXT,
-            date TEXT,
-            time_start TEXT,
-            duration_hours REAL,
-            car TEXT,
-            phone TEXT,
-            comment TEXT,
-            status TEXT DEFAULT 'новая',
-            created_at TEXT,
-            reminder_24h_sent BOOLEAN DEFAULT 0,
-            reminder_1h_sent BOOLEAN DEFAULT 0
-        )
-    """)
-    cur.execute("PRAGMA table_info(requests)")
-    existing_columns = [col[1] for col in cur.fetchall()]
-    if "reminder_24h_sent" not in existing_columns:
-        cur.execute("ALTER TABLE requests ADD COLUMN reminder_24h_sent BOOLEAN DEFAULT 0")
-    if "reminder_1h_sent" not in existing_columns:
-        cur.execute("ALTER TABLE requests ADD COLUMN reminder_1h_sent BOOLEAN DEFAULT 0")
-    conn.commit()
-    conn.close()
-
-def save_request(user_id, username, category, subcategory, date_str, time_start, duration, car, phone, comment):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO requests (
-            user_id, username, service_category, service_subcategory,
-            date, time_start, duration_hours, car, phone, comment, status, created_at,
-            reminder_24h_sent, reminder_1h_sent
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'новая', ?, 0, 0)
-    """, (user_id, username, category, subcategory, date_str, time_start, duration,
-          car, phone, comment, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
-    return cur.lastrowid
-
-def get_requests(limit=5, offset=0, status_filter=None):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    query = """
-        SELECT id, user_id, username, service_category, service_subcategory,
-               date, time_start, duration_hours, car, phone, comment, status, created_at,
-               reminder_24h_sent, reminder_1h_sent
-        FROM requests
-    """
-    params = []
-    if status_filter and status_filter != 'все':
-        query += " WHERE status = ?"
-        params.append(status_filter)
-    query += " ORDER BY id DESC LIMIT ? OFFSET ?"
-    params.extend([limit, offset])
-    cur.execute(query, params)
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-def count_requests(status_filter=None):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    query = "SELECT COUNT(*) FROM requests"
-    params = []
-    if status_filter and status_filter != 'все':
-        query += " WHERE status = ?"
-        params.append(status_filter)
-    cur.execute(query, params)
-    count = cur.fetchone()[0]
-    conn.close()
-    return count
-
-def get_request_by_id(req_id):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM requests WHERE id = ?", (req_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row
-
-def update_request_status(req_id, new_status):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("UPDATE requests SET status = ? WHERE id = ?", (new_status, req_id))
-    conn.commit()
-    conn.close()
-
-def delete_request(req_id):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("DELETE FROM requests WHERE id = ?", (req_id,))
-    conn.commit()
-    conn.close()
-
-def get_stats():
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM requests")
-    total = cur.fetchone()[0]
-    cur.execute("SELECT service_category, COUNT(*) FROM requests GROUP BY service_category")
-    by_category = cur.fetchall()
-    cur.execute("SELECT status, COUNT(*) FROM requests GROUP BY status")
-    by_status = cur.fetchall()
-    conn.close()
-    return total, by_category, by_status
-
-def get_all_active_requests():
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT id, user_id, username, date, time_start, service_category, service_subcategory,
-               reminder_24h_sent, reminder_1h_sent
-        FROM requests
-        WHERE status NOT IN ('отменена', 'выполнена')
-    """)
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-def mark_reminder_sent(req_id, reminder_type):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    if reminder_type == '24h':
-        cur.execute("UPDATE requests SET reminder_24h_sent = 1 WHERE id = ?", (req_id,))
-    elif reminder_type == '1h':
-        cur.execute("UPDATE requests SET reminder_1h_sent = 1 WHERE id = ?", (req_id,))
-    conn.commit()
-    conn.close()
-
-# ---------- Проверка доступности ----------
-def is_date_available(date_str):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT duration_hours FROM requests
-        WHERE date = ? AND status NOT IN ('отменена', 'выполнена')
-    """, (date_str,))
-    rows = cur.fetchall()
-    conn.close()
-    for (dur,) in rows:
-        if dur >= 8:
-            return False
-    return True
-
-def get_busy_time_slots(date_str):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT time_start, duration_hours FROM requests
-        WHERE date = ? AND time_start IS NOT NULL
-          AND status NOT IN ('отменена', 'выполнена')
-    """, (date_str,))
-    rows = cur.fetchall()
-    conn.close()
-    intervals = []
-    for time_str, dur in rows:
-        h, m = map(int, time_str.split(':'))
-        start_min = h * 60 + m
-        end_min = start_min + int(dur * 60)
-        intervals.append((start_min, end_min))
-    return intervals
-
-def get_available_time_slots(date_str, duration_hours):
-    if not is_date_available(date_str):
-        return []
-    busy = get_busy_time_slots(date_str)
-    step = SLOT_INTERVAL
-    start_min = WORK_START_HOUR * 60
-    end_min = WORK_END_HOUR * 60
-    duration_min = int(duration_hours * 60)
-    slots = []
-    t = start_min
-    while t + duration_min <= end_min:
-        free = True
-        for b_start, b_end in busy:
-            if not (t + duration_min <= b_start or t >= b_end):
-                free = False
-                break
-        if free:
-            h = t // 60
-            m = t % 60
-            slots.append(f"{h:02d}:{m:02d}")
-        t += step
-    return slots
-
-# ---------- Напоминания ----------
-async def send_reminders(bot: Bot):
-    now = datetime.now()
-    requests = get_all_active_requests()
-    for req in requests:
-        req_id, user_id, username, date_str, time_start, category, subcategory, rem24, rem1 = req
-        try:
-            dt_date = datetime.strptime(date_str, "%d.%m.%Y")
-        except:
-            continue
-
-        if time_start:
-            try:
-                h, m = map(int, time_start.split(':'))
-                dt_appointment = dt_date.replace(hour=h, minute=m, second=0, microsecond=0)
-            except:
-                continue
-        else:
-            dt_appointment = dt_date.replace(hour=WORK_START_HOUR, minute=0, second=0, microsecond=0)
-
-        if not rem24:
-            delta = dt_appointment - now
-            if timedelta(hours=23.5) <= delta <= timedelta(hours=24.5):
-                text = (
-                    f"📅 <b>Напоминание!</b>\n"
-                    f"Вы записаны в BUNKER Detailing на завтра.\n"
-                    f"🛠 {category} → {subcategory}\n"
-                    f"📅 {date_str}"
-                )
-                if time_start:
-                    text += f"\n🕒 {time_start}"
-                text += "\n\nЖдём вас! 🚗"
-                try:
-                    await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
-                    mark_reminder_sent(req_id, '24h')
-                    logging.info(f"Отправлено напоминание за 24ч для заявки {req_id}")
-                except Exception as e:
-                    logging.error(f"Ошибка напоминания 24ч для {req_id}: {e}")
-
-        if time_start and not rem1:
-            delta = dt_appointment - now
-            if timedelta(minutes=55) <= delta <= timedelta(minutes=65):
-                text = (
-                    f"⏰ <b>Напоминание!</b>\n"
-                    f"Вы записаны в BUNKER Detailing через 1 час.\n"
-                    f"🛠 {category} → {subcategory}\n"
-                    f"📅 {date_str} в {time_start}\n\n"
-                    "Не опаздывайте! 🚗"
-                )
-                try:
-                    await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
-                    mark_reminder_sent(req_id, '1h')
-                    logging.info(f"Отправлено напоминание за 1ч для заявки {req_id}")
-                except Exception as e:
-                    logging.error(f"Ошибка напоминания 1ч для {req_id}: {e}")
-
-# ---------- FSM ----------
-class Booking(StatesGroup):
-    waiting_service_category = State()
-    waiting_service_subcategory = State()
-    waiting_other_service = State()
-    waiting_date = State()
-    waiting_time = State()
-    waiting_car = State()
-    waiting_phone = State()
-    waiting_comment = State()
-    waiting_confirm = State()
-
-# ---------- Клавиатуры ----------
-skip_kb = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="Пропустить")]],
-    resize_keyboard=True,
-    one_time_keyboard=True
+# ---------- Логирование ----------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
-confirm_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="✅ Да, всё верно"), KeyboardButton(text="❌ Нет, исправить")]
-    ],
-    resize_keyboard=True,
-    one_time_keyboard=True
-)
+log = logging.getLogger("stryx-bot")
 
-# ---------- Бот ----------
-bot = Bot(token=BOT_TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+
+# ---------- Инициализация бота и диспетчера ----------
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-# ---------- Вспомогательные функции админки ----------
-def format_request_row(row):
-    req_id, user_id, username, category, subcategory, date_str, time_start, duration, car, phone, comment, status, created_at, rem24, rem1 = row
-    status_emoji = {
-        'новая': '🟢',
-        'подтверждена': '🟡',
-        'выполнена': '🟣',
-        'отменена': '🔴'
-    }.get(status, '⚪')
-    date_short = datetime.fromisoformat(created_at).strftime("%d.%m %H:%M")
-    time_display = f" {time_start}" if time_start else ""
-    return f"{status_emoji} #{req_id} {subcategory}{time_display} — {car} ({date_short})"
 
-def get_status_kb(req_id):
-    buttons = [
-        [InlineKeyboardButton(text="🟢 Новая", callback_data=f"setstatus_{req_id}_новая"),
-         InlineKeyboardButton(text="🟡 Подтверждена", callback_data=f"setstatus_{req_id}_подтверждена")],
-        [InlineKeyboardButton(text="🟣 Выполнена", callback_data=f"setstatus_{req_id}_выполнена"),
-         InlineKeyboardButton(text="🔴 Отменена", callback_data=f"setstatus_{req_id}_отменена")],
-        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delete_{req_id}")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+# ---------- Пути к изображениям ----------
+IMG_WELCOME = "images/welcome.jpg"
+IMG_ABOUT   = "images/about.jpg"
+IMG_CASE_1  = "images/case_1.jpg"
+IMG_CASE_2  = "images/case_2.jpg"
+IMG_CASE_3  = "images/case_3.jpg"
 
-# ---------- Обработчики ----------
-@router.message(Command("start"))
-async def cmd_start(message: types.Message, state: FSMContext):
+
+# ============================================================
+# Метаданные изображений (для автозаглушек)
+# ============================================================
+IMAGE_META = {
+    IMG_WELCOME: dict(
+        title="Stryx",
+        subtitle="AI-автоматизация продаж · 24/7",
+        chips=["Telegram-боты", "AI-агенты", "CRM-конвейеры", "Дашборды"],
+    ),
+    IMG_ABOUT: dict(
+        title="Stryx Automation",
+        subtitle="Студия автоматизации · 30+ проектов",
+        badge="ABOUT",
+        chips=["aiogram 3", "n8n", "YandexGPT", "GigaChat", "amoCRM"],
+    ),
+    IMG_CASE_1: dict(
+        title="Агентство недвижимости",
+        subtitle="Казань · AI-агент на YandexGPT",
+        badge="КЕЙС 01",
+        stats=[("40мин→3с", "время ответа"),
+               ("+30%",     "просмотры"),
+               ("+22%",     "конверсия")],
+    ),
+    IMG_CASE_2: dict(
+        title="Детейлинг-центр",
+        subtitle="Онлайн-запись + финдашборд",
+        badge="КЕЙС 02",
+        stats=[("+35%", "загрузка"),
+               ("0",    "накладок"),
+               ("24/7", "запись")],
+    ),
+    IMG_CASE_3: dict(
+        title="Застройщик",
+        subtitle="Конвейер заявок + автопрогрев",
+        badge="КЕЙС 03",
+        stats=[("0",     "потерь"),
+               ("+18%",  "сделок"),
+               ("5→1",   "канал")],
+    ),
+}
+
+
+# ---------- Вспомогательные функции отрисовки (без изменений) ----------
+def _hex(h: str) -> tuple[int, int, int]:
+    h = h.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+def _load_font(size: int, bold: bool = False):
+    names = (["segoeuib.ttf", "arialbd.ttf", "calibrib.ttf"] if bold
+             else ["segoeui.ttf", "arial.ttf", "calibri.ttf"])
+    for n in names:
+        try:
+            return ImageFont.truetype(n, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+def _text_w(draw, text: str, font) -> int:
+    bbox = draw.textbbox((0, 0), text, font=font)
+    return bbox[2] - bbox[0]
+
+def _draw_center(draw, text: str, font, fill, cx: int, y: int) -> None:
+    w = _text_w(draw, text, font)
+    draw.text((cx - w // 2, y), text, font=font, fill=fill)
+
+def _draw_tracked_center(draw, text: str, font, fill, cx: int, y: int, tracking: int = 8) -> None:
+    widths = [_text_w(draw, ch, font) for ch in text]
+    total = sum(widths) + tracking * (len(text) - 1)
+    x = cx - total // 2
+    for ch, w in zip(text, widths):
+        draw.text((x, y), ch, font=font, fill=fill)
+        x += w + tracking
+
+def _fit_font(draw, text: str, max_width: int, start_size: int, bold: bool = True, min_size: int = 24):
+    size = start_size
+    while size > min_size:
+        font = _load_font(size, bold)
+        if _text_w(draw, text, font) <= max_width:
+            return font
+        size -= 4
+    return _load_font(min_size, bold)
+
+def _glow(img, cx: int, cy: int, radius: int, color: tuple[int, int, int], alpha: int = 120) -> None:
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    od = ImageDraw.Draw(overlay)
+    od.ellipse([cx - radius, cy - radius, cx + radius, cy + radius], fill=(*color, alpha))
+    overlay = overlay.filter(ImageFilter.GaussianBlur(radius // 3))
+    img.alpha_composite(overlay)
+
+def _blend_rect(img, rect, radius: int, fill_rgba, outline_rgba=None) -> None:
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    od = ImageDraw.Draw(overlay)
+    if outline_rgba:
+        od.rounded_rectangle(rect, radius=radius, fill=fill_rgba, outline=outline_rgba, width=1)
+    else:
+        od.rounded_rectangle(rect, radius=radius, fill=fill_rgba)
+    img.alpha_composite(overlay)
+
+def _gradient_bg(W: int, H: int, top: tuple, bottom: tuple) -> Image.Image:
+    img = Image.new("RGB", (W, H))
+    d = ImageDraw.Draw(img)
+    for y in range(H):
+        t = y / max(H - 1, 1)
+        r = int(top[0] + (bottom[0] - top[0]) * t)
+        g = int(top[1] + (bottom[1] - top[1]) * t)
+        b = int(top[2] + (bottom[2] - top[2]) * t)
+        d.line([(0, y), (W, y)], fill=(r, g, b))
+    return img
+
+def _draw_logo_mark(draw, x: int, y: int, size: int, accent) -> None:
+    draw.rounded_rectangle([x, y, x + size, y + size], radius=size // 4, fill=accent)
+    font = _load_font(int(size * 0.55), bold=True)
+    bbox = draw.textbbox((0, 0), "S", font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    draw.text((x + (size - tw) // 2, y + (size - th) // 2 - bbox[1]), "S", font=font, fill=(255, 255, 255))
+
+def _draw_chip(img, draw, x: int, y: int, text: str, font,
+               text_color=(255, 255, 255), bg_rgba=(255, 255, 255, 26), border_rgba=(255, 255, 255, 60)) -> int:
+    pad_x, pad_y = 22, 14
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    w = tw + pad_x * 2
+    h = th + pad_y * 2
+    rect = [x, y, x + w, y + h]
+    _blend_rect(img, rect, h // 2, bg_rgba, border_rgba)
+    draw.text((x + pad_x, y + pad_y - bbox[1]), text, font=font, fill=text_color)
+    return w
+
+def _draw_chips_row(img, draw, chips: list[str], cx: int, y: int, font_size: int = 22, gap: int = 14) -> None:
+    max_w = img.width - 100
+    size = font_size
+    while size > 14:
+        font = _load_font(size)
+        widths = [_text_w(draw, c, font) + 44 for c in chips]
+        total = sum(widths) + gap * (len(chips) - 1)
+        if total <= max_w:
+            break
+        size -= 2
+    font = _load_font(size)
+    real_widths = []
+    for c in chips:
+        bbox = draw.textbbox((0, 0), c, font=font)
+        real_widths.append(bbox[2] - bbox[0] + 44)
+    total = sum(real_widths) + gap * (len(chips) - 1)
+    x = cx - total // 2
+    for c, w in zip(chips, real_widths):
+        _draw_chip(img, draw, x, y, c, font)
+        x += w + gap
+
+def _draw_stat(draw, cx: int, y: int, value: str, label: str, f_val, f_lbl, accent, secondary) -> None:
+    _draw_center(draw, value, f_val, accent, cx, y)
+    _draw_center(draw, label, f_lbl, secondary, cx, y + 76)
+
+def _make_placeholder(path: str, title: str, subtitle: str = "", *, badge: str | None = None,
+                      stats: list[tuple[str, str]] | None = None, chips: list[str] | None = None,
+                      size: tuple[int, int] = (1280, 720)) -> None:
+    W, H = size
+    accent1   = _hex("#6366F1")
+    accent2   = _hex("#22D3EE")
+    white     = (255, 255, 255)
+    secondary = _hex("#94A3B8")
+
+    img = _gradient_bg(W, H, _hex("#0B0F1A"), _hex("#1A1F3D")).convert("RGBA")
+    _glow(img, int(W * 0.88), int(H * 0.10), 360, accent1, 130)
+    _glow(img, int(W * 0.10), int(H * 0.95), 300, accent2, 70)
+    draw = ImageDraw.Draw(img)
+
+    draw.rectangle([0, 0, W, 6], fill=accent1)
+    draw.rectangle([0, H - 6, W, H], fill=accent2)
+
+    _draw_logo_mark(draw, 48, 48, 56, accent1)
+    f_brand = _load_font(26, bold=True)
+    f_tag   = _load_font(12)
+    draw.text((48 + 56 + 16, 58), "STRYX", font=f_brand, fill=white)
+    draw.text((48 + 56 + 16, 92), "AUTOMATION", font=f_tag, fill=secondary)
+
+    if badge:
+        f_b  = _load_font(20, bold=True)
+        bw   = _text_w(draw, badge, f_b) + 32
+        bh   = 40
+        bx   = W - 48 - bw
+        _blend_rect(img, [bx, 48, bx + bw, 48 + bh], 20, (99, 102, 241, 80), (99, 102, 241, 150))
+        draw.text((bx + 16, 48 + 9), badge, font=f_b, fill=white)
+
+    title_txt = title if badge else title.upper()
+    f_title = _fit_font(draw, title_txt, W - 200, 82, bold=True, min_size=40)
+    y_title = H // 2 - (140 if stats else 90)
+    if badge:
+        _draw_center(draw, title_txt, f_title, white, W // 2, y_title)
+    else:
+        _draw_tracked_center(draw, title_txt, f_title, white, W // 2, y_title, tracking=8)
+
+    if subtitle:
+        f_sub = _load_font(32)
+        _draw_center(draw, subtitle, f_sub, secondary, W // 2, y_title + 110)
+
+    if stats:
+        f_val = _load_font(58, bold=True)
+        f_lbl = _load_font(20)
+        y_stat = H // 2 + 70
+        step   = W // (len(stats) + 1)
+        for i, (v, l) in enumerate(stats):
+            _draw_stat(draw, step * (i + 1), y_stat, v, l, f_val, f_lbl, accent2, secondary)
+
+    if chips:
+        _draw_chips_row(img, draw, chips, W // 2, H - 110)
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    img.convert("RGB").save(path, "JPEG", quality=92)
+
+def ensure_images() -> None:
+    if not PILLOW_OK:
+        log.warning("Pillow не установлен — автогенерация заглушек пропущена.")
+        return
+    os.makedirs("images", exist_ok=True)
+    for path, meta in IMAGE_META.items():
+        if os.path.exists(path):
+            continue
+        try:
+            _make_placeholder(path, **meta)
+            log.info(f"Сгенерирована заглушка: {path}")
+        except Exception as e:
+            log.warning(f"Не удалось создать заглушку {path}: {e}")
+
+
+# ============================================================
+# SQLite
+# ============================================================
+def init_db() -> None:
+    conn = sqlite3.connect("leads.db")
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS leads (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            tg_id        INTEGER,
+            username     TEXT,
+            niche        TEXT,
+            channels     TEXT,
+            speed        TEXT,
+            contact      TEXT,
+            created_at   TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def save_lead(tg_id: int, username: str, niche: str, channels: str, speed: str, contact: str) -> int:
+    conn = sqlite3.connect("leads.db")
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO leads (tg_id, username, niche, channels, speed, contact, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (tg_id, username, niche, channels, speed, contact, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    lead_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return lead_id
+
+
+# ============================================================
+# FSM
+# ============================================================
+class AuditFSM(StatesGroup):
+    niche    = State()
+    channels = State()
+    speed    = State()
+    contact  = State()
+
+
+# ============================================================
+# Утилита: безопасная отправка фото
+# ============================================================
+async def safe_send_photo(chat_id: int, path: str, caption: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:
+    if os.path.exists(path):
+        await bot.send_photo(chat_id=chat_id, photo=FSInputFile(path), caption=caption, reply_markup=reply_markup)
+    else:
+        log.warning(f"Файл {path} не найден, отправляю текст.")
+        await bot.send_message(chat_id, caption, reply_markup=reply_markup)
+
+
+# ============================================================
+# Клавиатуры
+# ============================================================
+def main_menu_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="👤 Обо мне",              callback_data="menu:about")
+    kb.button(text="🛠 Что я делаю",          callback_data="menu:services")
+    kb.button(text="📈 Кейсы",                callback_data="menu:cases")
+    kb.button(text="💼 Тарифы",               callback_data="menu:pricing")
+    kb.button(text="🎁 Бесплатный аудит",     callback_data="menu:audit")
+    kb.button(text="✉️ Написать напрямую",    url=PERSONAL_LINK)
+    kb.adjust(1, 1, 1, 1, 1, 1)
+    return kb.as_markup()
+
+def back_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data="menu:back")
+    return kb.as_markup()
+
+def services_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🤖 Telegram-боты для заявок",       callback_data="srv:1")
+    kb.button(text="🧠 AI-агенты (YandexGPT/GigaChat)", callback_data="srv:2")
+    kb.button(text="🔀 Конвейеры заявок → CRM",         callback_data="srv:3")
+    kb.button(text="🔥 Автопрогрев «спящих»",           callback_data="srv:4")
+    kb.button(text="📊 Финансовые дашборды",            callback_data="srv:5")
+    kb.button(text="⬅️ Назад", callback_data="menu:back")
+    kb.adjust(1, 1, 1, 1, 1, 1)
+    return kb.as_markup()
+
+def cases_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🏢 Агентство недвижимости", callback_data="case:1")
+    kb.button(text="🚗 Детейлинг-центр",        callback_data="case:2")
+    kb.button(text="🏗 Застройщик",             callback_data="case:3")
+    kb.button(text="⬅️ Назад", callback_data="menu:back")
+    kb.adjust(1, 1, 1, 1)
+    return kb.as_markup()
+
+def pricing_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🚀 Обсудить тариф", url=PERSONAL_LINK)
+    kb.button(text="⬅️ Назад", callback_data="menu:back")
+    kb.adjust(1, 1)
+    return kb.as_markup()
+
+def cancel_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="❌ Отменить", callback_data="audit:cancel")
+    return kb.as_markup()
+
+
+# ============================================================
+# Хендлеры (без изменений, для краткости показаны ключевые)
+# ============================================================
+@router.message(CommandStart())
+async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
-    photo_path = "welcome.jpg"
     caption = (
-        "🚗 <b>Добро пожаловать в BUNKER Detailing!</b>\n\n"
-        "Выберите услугу:\n"
-        "• 🧽 Полировка\n"
-        "• 🧹 Химчистка\n"
-        "• 🪟 Тонировка\n\n"
-        "📍 <b>Адрес:</b> Тюмень, ул. Сиреневая, 25\n"
-        "📞 <b>Телефон:</b> <a href='tel:+79222220572'>+7 (922) 222-05-72</a>\n"
-        "👇 Нажмите, чтобы записаться"
+        "👋 <b>Привет!</b>\n"
+        "Это официальный бот <b>Stryx Automation</b>.\n\n"
+        "⚙️ Автоматизируем продажи так, чтобы <i>ни одна заявка не терялась</i>.\n\n"
+        "🎯 <b>Для кого:</b>\n"
+        "• Агентства недвижимости\n"
+        "• Детейлинг и автосервисы\n"
+        "• Застройщики\n"
+        "• Онлайн-школы и услуги\n\n"
+        "👇 Выберите, что вам интересно:"
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📝 Записаться", callback_data="start_booking")]
-    ])
-    if path.exists(photo_path):
-        photo = FSInputFile(photo_path)
-        await message.answer_photo(photo, caption=caption, reply_markup=kb, parse_mode="HTML")
-    else:
-        await message.answer(caption, reply_markup=kb, parse_mode="HTML")
+    await safe_send_photo(message.chat.id, IMG_WELCOME, caption, main_menu_kb())
 
-@router.callback_query(lambda c: c.data == "start_booking")
-async def start_booking(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await callback.message.delete()
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🧽 Полировка", callback_data="cat_Полировка")],
-        [InlineKeyboardButton(text="🧹 Химчистка", callback_data="cat_Химчистка")],
-        [InlineKeyboardButton(text="🪟 Тонировка", callback_data="cat_Тонировка")],
-        [InlineKeyboardButton(text="✏️ Другое", callback_data="cat_Другое")]
-    ])
-    await callback.message.answer(
-        "🛠 <b>Выберите категорию услуги</b>:",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
-    await state.set_state(Booking.waiting_service_category)
+@router.message(Command("menu"))
+async def cmd_menu(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("🏠 <b>Главное меню</b>", reply_markup=main_menu_kb())
 
-@router.callback_query(Booking.waiting_service_category)
-async def process_category(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    cat = callback.data.replace("cat_", "")
-    if cat == "Другое":
-        await callback.message.edit_text(
-            "✏️ Напишите, какая услуга вас интересует:",
-            reply_markup=None
-        )
-        await state.set_state(Booking.waiting_other_service)
-        return
-    await state.update_data(category=cat)
-    if cat in SERVICES and SERVICES[cat]:
-        subcats = list(SERVICES[cat].keys())
-        kb_buttons = []
-        for sub in subcats:
-            kb_buttons.append([InlineKeyboardButton(text=sub, callback_data=f"sub_{sub}")])
-        kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
-        await callback.message.edit_text(
-            f"🧩 <b>Выберите тип {cat.lower()}:</b>",
-            reply_markup=kb,
-            parse_mode="HTML"
-        )
-        await state.set_state(Booking.waiting_service_subcategory)
-    else:
-        params = {"duration": 1, "requires_time": False}
-        await state.update_data(subcategory=cat, duration=params["duration"], requires_time=params["requires_time"])
-        await show_calendar(callback.message, state)
-
-@router.callback_query(Booking.waiting_service_subcategory)
-async def process_subcategory(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    sub = callback.data.replace("sub_", "")
-    data = await state.get_data()
-    cat = data.get('category')
-    params = get_service_params(cat, sub)
-    await state.update_data(subcategory=sub, duration=params["duration"], requires_time=params["requires_time"])
-    await show_calendar(callback.message, state)
-
-@router.message(Booking.waiting_other_service)
-async def process_other_service(message: types.Message, state: FSMContext):
-    if not message.text.strip():
-        await message.answer("Пожалуйста, напишите название услуги.")
-        return
-    await state.update_data(category="Другое", subcategory=message.text.strip(), duration=2, requires_time=False)
-    await show_calendar(message, state)
-
-async def show_calendar(message: types.Message, state: FSMContext):
-    now = datetime.now()
-    calendar = SimpleCalendar(locale='ru')
-    await message.answer(
-        "📅 <b>Выберите дату</b> (дни, занятые длительными услугами, будут заблокированы):",
-        reply_markup=await calendar.start_calendar(year=now.year, month=now.month),
-        parse_mode="HTML"
-    )
-    await state.set_state(Booking.waiting_date)
-
-@router.callback_query(SimpleCalendarCallback.filter())
-async def process_calendar(callback: CallbackQuery, callback_data: SimpleCalendarCallback, state: FSMContext):
-    calendar = SimpleCalendar(locale='ru')
-    selected, date_obj = await calendar.process_selection(callback, callback_data)
-    if selected:
-        date_str = date_obj.strftime("%d.%m.%Y")
-        if not is_date_available(date_str):
-            await callback.message.edit_text(
-                "❌ Эта дата занята длительной услугой (химчистка, глубокая полировка). Пожалуйста, выберите другую дату.",
-                reply_markup=await calendar.start_calendar(year=date_obj.year, month=date_obj.month)
-            )
-            return
-        await state.update_data(date=date_str)
-        data = await state.get_data()
-        if data.get('requires_time', False):
-            duration = data.get('duration')
-            slots = get_available_time_slots(date_str, duration)
-            if not slots:
-                await callback.message.edit_text(
-                    "❌ На эту дату нет свободных временных слотов. Выберите другую дату.",
-                    reply_markup=await calendar.start_calendar(year=date_obj.year, month=date_obj.month)
-                )
-                return
-            await state.update_data(available_slots=slots)
-            kb_buttons = []
-            row = []
-            for slot in slots:
-                row.append(InlineKeyboardButton(text=slot, callback_data=f"time_{slot}"))
-                if len(row) == 3:
-                    kb_buttons.append(row)
-                    row = []
-            if row:
-                kb_buttons.append(row)
-            kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
-            await callback.message.edit_text(
-                "🕒 <b>Выберите удобное время начала:</b>",
-                reply_markup=kb,
-                parse_mode="HTML"
-            )
-            await state.set_state(Booking.waiting_time)
-        else:
-            await callback.message.edit_text(
-                f"✅ Выбрана дата: <b>{date_str}</b>\n"
-                "Теперь укажите марку и модель автомобиля:",
-                parse_mode="HTML"
-            )
-            await state.set_state(Booking.waiting_car)
-
-@router.callback_query(Booking.waiting_time)
-async def process_time_selection(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    time_str = callback.data.replace("time_", "")
-    data = await state.get_data()
-    date_str = data.get('date')
-    duration = data.get('duration')
-    slots = get_available_time_slots(date_str, duration)
-    if time_str not in slots:
-        await callback.message.edit_text(
-            "❌ Этот слот уже занят. Пожалуйста, выберите другой."
-        )
-        new_slots = get_available_time_slots(date_str, duration)
-        if new_slots:
-            await state.update_data(available_slots=new_slots)
-            kb_buttons = []
-            row = []
-            for slot in new_slots:
-                row.append(InlineKeyboardButton(text=slot, callback_data=f"time_{slot}"))
-                if len(row) == 3:
-                    kb_buttons.append(row)
-                    row = []
-            if row:
-                kb_buttons.append(row)
-            kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
-            await callback.message.edit_text(
-                "🕒 <b>Выберите удобное время начала:</b>",
-                reply_markup=kb,
-                parse_mode="HTML"
-            )
-        else:
-            await callback.message.edit_text(
-                "❌ На эту дату больше нет свободных слотов. Попробуйте выбрать другую дату через /start"
-            )
-            await state.clear()
-        return
-    await state.update_data(time_start=time_str)
-    await callback.message.edit_text(
-        f"✅ Выбрано время: <b>{time_str}</b>\n"
-        "Теперь укажите марку и модель автомобиля:",
-        parse_mode="HTML"
-    )
-    await state.set_state(Booking.waiting_car)
-
-@router.message(Booking.waiting_car)
-async def process_car(message: types.Message, state: FSMContext):
-    car = message.text.strip()
-    if not car:
-        await message.answer("Пожалуйста, введите марку и модель.")
-        return
-    await state.update_data(car=car)
-    await message.answer(
-        "📞 <b>Укажите ваш контактный телефон</b>\n"
-        "Например: +7 (123) 456-78-90",
-        parse_mode="HTML"
-    )
-    await state.set_state(Booking.waiting_phone)
-
-@router.message(Booking.waiting_phone)
-async def process_phone(message: types.Message, state: FSMContext):
-    phone = message.text.strip()
-    if not phone:
-        await message.answer("Пожалуйста, укажите телефон для связи.")
-        return
-    if not any(ch.isdigit() for ch in phone):
-        await message.answer("❌ Номер должен содержать цифры. Попробуйте ещё раз.")
-        return
-    await state.update_data(phone=phone)
-    await message.answer(
-        "💬 <b>Комментарий к заявке</b> (необязательно)\n"
-        "Если есть особые пожелания, напишите их. Или нажмите «Пропустить».",
-        reply_markup=skip_kb,
-        parse_mode="HTML"
-    )
-    await state.set_state(Booking.waiting_comment)
-
-@router.message(Booking.waiting_comment)
-async def process_comment(message: types.Message, state: FSMContext):
-    comment = message.text.strip()
-    if comment == "Пропустить":
-        comment = "Без комментария"
-    await state.update_data(comment=comment)
-    data = await state.get_data()
-    date_str = data.get('date')
-    if not is_date_available(date_str):
-        await message.answer(
-            "❌ К сожалению, эта дата уже занята длительной услугой. Пожалуйста, начните заново с /start."
-        )
-        await state.clear()
-        return
-    if data.get('requires_time', False):
-        time_str = data.get('time_start')
-        duration = data.get('duration')
-        slots = get_available_time_slots(date_str, duration)
-        if time_str not in slots:
-            await message.answer(
-                "❌ К сожалению, выбранный слот уже занят. Пожалуйста, начните заново с /start."
-            )
-            await state.clear()
-            return
-
-    text = (
-        "✅ <b>Проверьте введённые данные:</b>\n\n"
-        f"🛠 Услуга: <b>{html.escape(data.get('category'))} → {html.escape(data.get('subcategory'))}</b>\n"
-        f"📅 Дата: <b>{html.escape(date_str)}</b>\n"
-    )
-    if data.get('requires_time', False):
-        text += f"🕒 Время: <b>{html.escape(data.get('time_start'))}</b>\n"
-    text += (
-        f"⏳ Длительность: <b>{data.get('duration')} ч.</b>\n"
-        f"🚘 Авто: <b>{html.escape(data.get('car'))}</b>\n"
-        f"📞 Телефон: <b>{html.escape(data.get('phone'))}</b>\n"
-        f"💬 Комментарий: <b>{html.escape(data.get('comment'))}</b>\n\n"
-        "Всё верно? Нажмите «Да» или «Нет»."
-    )
-    await message.answer(text, reply_markup=confirm_kb, parse_mode="HTML")
-    await state.set_state(Booking.waiting_confirm)
-
-@router.message(Booking.waiting_confirm)
-async def process_confirm(message: types.Message, state: FSMContext):
-    if message.text == "✅ Да, всё верно":
-        data = await state.get_data()
-        date_str = data.get('date')
-        if not is_date_available(date_str):
-            await message.answer(
-                "❌ К сожалению, эта дата уже занята. Пожалуйста, начните заново с /start."
-            )
-            await state.clear()
-            return
-        if data.get('requires_time', False):
-            time_str = data.get('time_start')
-            duration = data.get('duration')
-            slots = get_available_time_slots(date_str, duration)
-            if time_str not in slots:
-                await message.answer(
-                    "❌ К сожалению, выбранный слот уже занят. Пожалуйста, начните заново с /start."
-                )
-                await state.clear()
-                return
-            time_to_save = time_str
-        else:
-            time_to_save = None
-
-        user_id = message.from_user.id
-        username = message.from_user.username or "Не указан"
-        req_id = save_request(
-            user_id,
-            username,
-            data.get('category'),
-            data.get('subcategory'),
-            date_str,
-            time_to_save,
-            data.get('duration'),
-            data.get('car'),
-            data.get('phone'),
-            data.get('comment')
-        )
-        report = (
-            f"🚗 <b>Новая заявка # {req_id}</b>\n"
-            f"🛠 Услуга: {html.escape(data.get('category'))} → {html.escape(data.get('subcategory'))}\n"
-            f"📅 Дата: {html.escape(date_str)}\n"
-        )
-        if time_to_save:
-            report += f"🕒 Время: {html.escape(time_to_save)}\n"
-        report += (
-            f"⏳ Длительность: {data.get('duration')} ч.\n"
-            f"🚘 Авто: {html.escape(data.get('car'))}\n"
-            f"📞 Телефон: {html.escape(data.get('phone'))}\n"
-            f"💬 Комментарий: {html.escape(data.get('comment'))}\n"
-            f"👤 От: @{html.escape(username)} (ID: {user_id})"
-        )
-        try:
-            await bot.send_message(chat_id=MANAGER_ID, text=report, parse_mode="HTML")
-        except Exception as e:
-            logging.error(f"Не удалось отправить менеджеру: {e}")
-            await message.answer(
-                "⚠️ Произошла ошибка при отправке. Мы уже работаем над этим.\n"
-                "Попробуйте позже или свяжитесь с нами по телефону.",
-                reply_markup=ReplyKeyboardRemove()
-            )
-            await state.clear()
-            return
-        await message.answer(
-            "✅ <b>Спасибо!</b> Ваша заявка принята.\n"
-            f"Мы забронировали за вами <b>{data.get('duration')} ч.</b> на {html.escape(date_str)}.\n"
-            "Наш менеджер свяжется с вами для подтверждения. 📞\n\n"
-            "Оставайтесь на связи! 🚗",
-            reply_markup=ReplyKeyboardRemove(),
-            parse_mode="HTML"
-        )
-        await state.clear()
-    elif message.text == "❌ Нет, исправить":
-        await message.answer(
-            "Хорошо, давайте начнём заново. Нажмите /start.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        await state.clear()
-    else:
-        await message.answer(
-            "Пожалуйста, нажмите одну из кнопок: «✅ Да» или «❌ Нет».",
-            reply_markup=confirm_kb
-        )
-
-# ---------- Админ-панель ----------
-@router.message(Command("admin"))
-async def admin_panel(message: types.Message):
-    if message.from_user.id != MANAGER_ID:
-        await message.answer("⛔ У вас нет доступа.")
-        return
-    await show_main_menu(message)
-
-async def show_main_menu(message: types.Message, edit=False):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Список заявок", callback_data="list_all")],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
-        [InlineKeyboardButton(text="🔍 Фильтр по статусу", callback_data="filter_menu")],
-        [InlineKeyboardButton(text="📥 Скачать БД", callback_data="download_db")]
-    ])
-    text = "🏢 <b>Админ-панель BUNKER</b>\nВыберите действие:"
-    if edit:
-        await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-    else:
-        await message.answer(text, reply_markup=kb, parse_mode="HTML")
-
-@router.callback_query(lambda c: c.data == "download_db")
-async def download_db(callback: CallbackQuery):
-    if callback.from_user.id != MANAGER_ID:
-        await callback.answer("⛔ Доступ запрещён", show_alert=True)
-        return
-    await callback.answer("Подготовка файла...")
-    if path.exists(DB_NAME):
-        file = FSInputFile(DB_NAME, filename=f"bunker_requests_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db")
-        await callback.message.answer_document(file, caption="📦 Выгрузка базы данных")
-    else:
-        await callback.message.answer("❌ Файл базы данных не найден.")
-
-@router.callback_query(lambda c: c.data == "admin_main")
-async def back_to_main(callback: CallbackQuery):
-    await callback.answer()
-    await show_main_menu(callback.message, edit=True)
-
-@router.callback_query(lambda c: c.data == "list_all")
-async def list_requests(callback: CallbackQuery):
-    await callback.answer()
-    await show_requests_page(callback.message, status_filter="все", page=0)
-
-@router.callback_query(lambda c: c.data.startswith("list_"))
-async def list_with_filter(callback: CallbackQuery):
-    await callback.answer()
-    parts = callback.data.split("_")
-    status = parts[1] if len(parts) > 1 else "все"
-    page = int(parts[2]) if len(parts) > 2 else 0
-    await show_requests_page(callback.message, status_filter=status, page=page)
-
-async def show_requests_page(message, status_filter="все", page=0):
-    per_page = 5
-    offset = page * per_page
-    rows = get_requests(limit=per_page, offset=offset, status_filter=status_filter)
-    total = count_requests(status_filter)
-    total_pages = (total + per_page - 1) // per_page
-
-    if not rows:
-        text = "📭 Заявок с таким фильтром нет."
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_main")]
-        ])
-        await message.edit_text(text, reply_markup=kb)
-        return
-
-    lines = [f"📋 <b>Заявки</b> (фильтр: {status_filter}) — стр. {page+1}/{total_pages}"]
-    for row in rows:
-        lines.append(format_request_row(row))
-    text = "\n".join(lines)
-
-    nav_buttons = []
-    if page > 0:
-        nav_buttons.append(InlineKeyboardButton(text="⬅️", callback_data=f"list_{status_filter}_{page-1}"))
-    if page < total_pages - 1:
-        nav_buttons.append(InlineKeyboardButton(text="➡️", callback_data=f"list_{status_filter}_{page+1}"))
-    kb_buttons = [nav_buttons] if nav_buttons else []
-
-    for row in rows:
-        req_id = row[0]
-        kb_buttons.append([InlineKeyboardButton(text=f"Детали #{req_id}", callback_data=f"detail_{req_id}")])
-
-    kb_buttons.append([InlineKeyboardButton(text="◀️ Назад в меню", callback_data="admin_main")])
-    kb_buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=f"list_{status_filter}_{page}")])
-
-    kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
-    await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-
-@router.callback_query(lambda c: c.data.startswith("detail_"))
-async def show_detail(callback: CallbackQuery):
-    req_id = int(callback.data.split("_")[1])
-    row = get_request_by_id(req_id)
-    if not row:
-        await callback.answer("Заявка не найдена")
-        return
-    await callback.answer()
-    time_display = f"🕒 Время: {row[6]}\n" if row[6] else ""
-    text = (
-        f"📄 <b>Заявка #{row[0]}</b>\n"
-        f"👤 Клиент: @{html.escape(row[2] or 'без username')} (ID: {row[1]})\n"
-        f"🛠 Услуга: {html.escape(row[3])} → {html.escape(row[4])}\n"
-        f"📅 Дата: {html.escape(row[5])}\n"
-        f"{time_display}"
-        f"⏳ Длительность: {row[7]} ч.\n"
-        f"🚘 Авто: {html.escape(row[8])}\n"
-        f"📞 Телефон: <a href='tel:{html.escape(row[9])}'>{html.escape(row[9])}</a>\n"
-        f"💬 Комментарий: {html.escape(row[10])}\n"
-        f"📊 Статус: {row[11]}\n"
-        f"📅 Дата создания: {datetime.fromisoformat(row[12]).strftime('%d.%m.%Y %H:%M')}"
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="◀️ Назад к списку", callback_data="list_all")],
-        *get_status_kb(req_id).inline_keyboard
-    ])
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-
-@router.callback_query(lambda c: c.data.startswith("setstatus_"))
-async def set_status(callback: CallbackQuery):
-    _, req_id, new_status = callback.data.split("_")
-    req_id = int(req_id)
-    update_request_status(req_id, new_status)
-    await callback.answer(f"Статус изменён на «{new_status}»")
-    await show_detail(callback)
-
-@router.callback_query(lambda c: c.data.startswith("delete_"))
-async def delete_req(callback: CallbackQuery):
-    req_id = int(callback.data.split("_")[1])
-    delete_request(req_id)
-    await callback.answer("Заявка удалена")
-    await show_requests_page(callback.message, status_filter="все", page=0)
-
-@router.callback_query(lambda c: c.data == "filter_menu")
-async def filter_menu(callback: CallbackQuery):
-    await callback.answer()
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🟢 Все", callback_data="list_все_0")],
-        [InlineKeyboardButton(text="🟢 Новые", callback_data="list_новая_0")],
-        [InlineKeyboardButton(text="🟡 Подтверждены", callback_data="list_подтверждена_0")],
-        [InlineKeyboardButton(text="🟣 Выполнены", callback_data="list_выполнена_0")],
-        [InlineKeyboardButton(text="🔴 Отменены", callback_data="list_отменена_0")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_main")]
-    ])
-    await callback.message.edit_text("🔍 <b>Выберите статус для фильтрации:</b>", reply_markup=kb, parse_mode="HTML")
-
-@router.callback_query(lambda c: c.data == "stats")
-async def show_stats(callback: CallbackQuery):
-    await callback.answer()
-    total, by_category, by_status = get_stats()
-    lines = ["📊 <b>Статистика заявок BUNKER</b>"]
-    lines.append(f"Всего: {total}")
-    lines.append("\nПо категориям:")
-    for cat, cnt in by_category:
-        lines.append(f"  {html.escape(cat)}: {cnt}")
-    lines.append("\nПо статусам:")
-    for s, cnt in by_status:
-        emoji = {'новая':'🟢','подтверждена':'🟡','выполнена':'🟣','отменена':'🔴'}.get(s,'⚪')
-        lines.append(f"  {emoji} {s}: {cnt}")
-    text = "\n".join(lines)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="admin_main")]
-    ])
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-
-# ---------- Flask для здоровья и скачивания БД ----------
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "✅ Бот BUNKER работает!"
-
-@app.route('/health')
-def health():
-    return "OK", 200
-
-@app.route('/download_db')
-def download_db_web():
-    if path.exists(DB_NAME):
-        return send_file(DB_NAME, as_attachment=True, download_name=f"bunker_requests_{datetime.now().strftime('%Y%m%d')}.db")
-    return "Файл не найден", 404
-
-# ---------- Keepalive (внутренний пинг для предотвращения засыпания) ----------
-async def keepalive():
-    """Каждые 5 минут отправляет запрос к своему health-эндпоинту, чтобы Render не считал сервис неактивным."""
-    while True:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get("http://localhost:10000/health") as resp:
-                    if resp.status == 200:
-                        logging.debug("Keepalive ping successful")
-                    else:
-                        logging.warning(f"Keepalive ping returned status {resp.status}")
-        except Exception as e:
-            logging.error(f"Keepalive ping failed: {e}")
-        await asyncio.sleep(300)  # 5 минут
-
-# ---------- Запуск ----------
-async def run_bot():
-    init_db()
-    logging.info("Бот BUNKER запущен")
-
-    # Удаляем вебхук, если он был установлен ранее (решит проблему конфликта)
+@router.callback_query(F.data == "menu:back")
+async def back_to_menu(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
     try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        logging.info("Вебхук успешно удалён")
-    except Exception as e:
-        logging.error(f"Ошибка при удалении вебхука: {e}")
+        await call.message.delete()
+    except Exception:
+        pass
+    caption = "🏠 <b>Главное меню</b>\n\nВыберите интересующий раздел 👇"
+    await safe_send_photo(call.message.chat.id, IMG_WELCOME, caption, main_menu_kb())
+    await call.answer()
 
-    # Запускаем задачу keepalive (не блокируем основной поток)
-    asyncio.create_task(keepalive())
-    logging.info("Keepalive задача запущена (каждые 5 минут)")
-
-    # Планировщик напоминаний
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(
-        send_reminders,
-        trigger=IntervalTrigger(seconds=30),
-        args=[bot],
-        id="reminder_job",
-        replace_existing=True
+@router.callback_query(F.data == "menu:about")
+async def about(call: CallbackQuery) -> None:
+    text = (
+        "👤 <b>Обо мне</b>\n\n"
+        "<b>Stryx Automation</b> — студия автоматизации бизнес-процессов. "
+        "Превращаем хаос из чатов и таблиц в чистые, работающие системы.\n\n"
+        "🎯 <b>Миссия:</b> чтобы <i>ни одна заявка не терялась</i> "
+        "и каждый клиент получал ответ мгновенно — <b>24/7</b>.\n\n"
+        "🧰 <b>Стек технологий:</b>\n"
+        "• <b>aiogram 3</b> — Telegram-боты\n"
+        "• <b>n8n</b> — конвейеры и интеграции\n"
+        "• <b>YandexGPT / GigaChat</b> — AI-агенты\n"
+        "• <b>amoCRM / Bitrix24</b> — CRM и дашборды\n"
+        "• <b>SQL / Google Sheets</b> — аналитика\n\n"
+        "📈 <b>Опыт:</b> 30+ реализованных проектов в недвижимости, "
+        "авто-бизнесе и услугах. Работаем под ключ: от ТЗ до запуска и поддержки."
     )
-    scheduler.start()
-    logging.info("Планировщик напоминаний запущен")
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    await safe_send_photo(call.message.chat.id, IMG_ABOUT, text, back_kb())
+    await call.answer()
 
-    # Запускаем polling
-    await dp.start_polling(bot)
+@router.callback_query(F.data == "menu:services")
+async def services(call: CallbackQuery) -> None:
+    text = "🛠 <b>Что я делаю</b>\n\nВыберите услугу, чтобы узнать подробнее 👇"
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    await bot.send_message(call.message.chat.id, text, reply_markup=services_kb())
+    await call.answer()
 
-def run_flask():
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, use_reloader=False)
+SERVICES = {
+    "1": "🤖 <b>Telegram-боты для обработки заявок</b>\n\nРазрабатываю боты, которые принимают заявки 24/7, квалифицируют клиента, отправляют уведомления менеджерам и автоматически создают сделки в CRM.\n\n✅ <b>Что получите:</b>\n• Приём заявок без задержек\n• Автоквалификация клиента\n• Мгновенные уведомления\n• Полная статистика по заявкам",
+    "2": "🧠 <b>AI-агенты (YandexGPT / GigaChat)</b>\n\nУмные ассистенты, которые ведут первичный диалог с клиентом, отвечают на вопросы, бронируют время и передают горячих лидов менеджеру.\n\n✅ <b>Что получите:</b>\n• Ответы клиентам 24/7\n• Снижение нагрузки на менеджеров\n• Рост конверсии в диалоге",
+    "3": "🔀 <b>Конвейеры заявок → CRM</b>\n\nОбъединяю все источники заявок в единую систему: <b>сайт, WhatsApp, Instagram, Авито</b> → <b>CRM</b>.\n\n✅ <b>Что получите:</b>\n• Ни одна заявка не теряется\n• Единое окно для менеджеров\n• Автоматическая постановка задач",
+    "4": "🔥 <b>Автопрогрев и возврат «спящих» клиентов</b>\n\nНастраиваю сценарии касаний: поздравления, акции, персональные напоминания. Возвращаю тех, кто «остыл».\n\n✅ <b>Что получите:</b>\n• Реактивация базы\n• Дополнительные сделки из старой базы\n• Рост LTV клиента",
+    "5": "📊 <b>Финансовые дашборды</b>\n\nСобираю дашборды по выручке, каналам и конверсии. Все ключевые метрики — в одном окне, всегда под рукой.\n\n✅ <b>Что получите:</b>\n• Прозрачные показатели\n• Решения на основе данных\n• Контроль каждого канала",
+}
+
+@router.callback_query(F.data.startswith("srv:"))
+async def service_detail(call: CallbackQuery) -> None:
+    key = call.data.split(":")[1]
+    text = SERVICES.get(key, "Информация недоступна.")
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✉️ Обсудить услугу", url=PERSONAL_LINK)
+    kb.button(text="⬅️ К списку услуг", callback_data="menu:services")
+    kb.adjust(1, 1)
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    await bot.send_message(call.message.chat.id, text, reply_markup=kb.as_markup())
+    await call.answer()
+
+@router.callback_query(F.data == "menu:cases")
+async def cases(call: CallbackQuery) -> None:
+    text = "📈 <b>Кейсы</b>\n\nВыберите кейс, чтобы увидеть детали: проблема → решение → результат 👇"
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    await bot.send_message(call.message.chat.id, text, reply_markup=cases_kb())
+    await call.answer()
+
+CASES = {
+    "1": {"img": IMG_CASE_1, "text": "🏢 <b>Кейс №1. Агентство недвижимости (Казань)</b>\n\n❗️<b>Проблема:</b>\nМенеджеры отвечали на заявки в среднем <b>40 минут</b>. Клиенты уходили к конкурентам, конверсия падала.\n\n🛠 <b>Решение:</b>\nВнедрили Telegram-бота с AI-агентом на YandexGPT. Бот отвечает мгновенно, квалифицирует клиента и передаёт горячих лидов менеджеру.\n\n📊 <b>Результат:</b>\n• Время ответа: <b>40 минут → 3 секунды</b>\n• Просмотры объектов: <b>+30%</b>\n• Рост конверсии в показ: <b>+22%</b>"},
+    "2": {"img": IMG_CASE_2, "text": "🚗 <b>Кейс №2. Детейлинг-центр</b>\n\n❗️<b>Проблема:</b>\nЗаписи велись вручную в WhatsApp. Постоянные накладки, двойные брони, потерянные клиенты.\n\n🛠 <b>Решение:</b>\nРазработали Telegram-бота для онлайн-записи с интеграцией в календарь + финансовый дашборд по услугам и мастерам.\n\n📊 <b>Результат:</b>\n• Загрузка мастеров: <b>+35%</b>\n• Накладки броней: <b>0</b>\n• Выручка видна в реальном времени"},
+    "3": {"img": IMG_CASE_3, "text": "🏗 <b>Кейс №3. Застройщик</b>\n\n❗️<b>Проблема:</b>\nЗаявки приходили из 5 источников (сайт, Авито, Instagram, звонки, рекомендации). Половина терялась, лиды «остывали».\n\n🛠 <b>Решение:</b>\nСобрали единый конвейер заявок в CRM + запустили автопрогрев «спящих» клиентов через Telegram-бота.\n\n📊 <b>Результат:</b>\n• Потерянных заявок: <b>0</b>\n• Возврат «спящих»: <b>+18% сделок</b>\n• Прозрачная аналитика по всем каналам"},
+}
+
+@router.callback_query(F.data.startswith("case:"))
+async def case_detail(call: CallbackQuery) -> None:
+    key = call.data.split(":")[1]
+    data = CASES.get(key)
+    if not data:
+        await call.answer("Кейс не найден", show_alert=True)
+        return
+    kb = InlineKeyboardBuilder()
+    kb.button(text="💬 Хочу так же", url=PERSONAL_LINK)
+    kb.button(text="⬅️ К списку кейсов", callback_data="menu:cases")
+    kb.adjust(1, 1)
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    await safe_send_photo(call.message.chat.id, data["img"], data["text"], kb.as_markup())
+    await call.answer()
+
+@router.callback_query(F.data == "menu:pricing")
+async def pricing(call: CallbackQuery) -> None:
+    text = (
+        "💼 <b>Тарифы Stryx Automation</b>\n\n"
+        "Выберите подходящий формат сотрудничества.\n"
+        "Все тарифы — <i>под ключ</i>, с поддержкой после запуска.\n\n"
+        "🚀 <b>«Старт» — 25 000 ₽</b>\n<i>Для первого шага в автоматизации</i>\n• Telegram-бот для приёма заявок\n• Уведомления менеджеру\n• Базовая аналитика\n• Срок: 5–7 дней\n\n"
+        "💎 <b>«Бизнес» — 45 000 ₽</b>\n<i>Оптимально для растущего бизнеса</i>\n• Всё из «Старт»\n• AI-агент на YandexGPT/GigaChat\n• Интеграция с CRM (amoCRM/Bitrix24)\n• Конвейер из 2–3 источников заявок\n• Срок: 10–14 дней\n\n"
+        "👑 <b>«Премиум» — 70 000 ₽</b>\n<i>Максимальная автоматизация</i>\n• Всё из «Бизнес»\n• Конвейер из всех источников (сайт, WhatsApp, Instagram, Авито)\n• Автопрогрев и возврат «спящих» клиентов\n• Финансовый дашборд\n• 1 месяц поддержки включён\n• Срок: 3–4 недели\n\n"
+        "👇 Нажмите кнопку ниже, чтобы обсудить детали."
+    )
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    await bot.send_message(call.message.chat.id, text, reply_markup=pricing_kb())
+    await call.answer()
+
+@router.callback_query(F.data == "menu:audit")
+async def audit_start(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(AuditFSM.niche)
+    text = (
+        "🎁 <b>Бесплатный аудит вашего бизнеса</b>\n\n"
+        "Задам <b>4 коротких вопроса</b> — на выходе вы получите "
+        "персональный разбор с точками роста автоматизации.\n\n"
+        "<i>Займёт меньше минуты.</i>\n\n"
+        "1️⃣ <b>Какая у вас ниша / сфера бизнеса?</b>\n"
+        "Например: недвижимость, детейлинг, услуги, e-com..."
+    )
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    await bot.send_message(call.message.chat.id, text, reply_markup=cancel_kb())
+    await call.answer()
+
+@router.message(AuditFSM.niche)
+async def audit_niche(message: Message, state: FSMContext) -> None:
+    await state.update_data(niche=message.text.strip())
+    await state.set_state(AuditFSM.channels)
+    await message.answer("2️⃣ <b>Откуда к вам приходят заявки?</b>\nПеречислите каналы: сайт, WhatsApp, Instagram, Авито, звонки...", reply_markup=cancel_kb())
+
+@router.message(AuditFSM.channels)
+async def audit_channels(message: Message, state: FSMContext) -> None:
+    await state.update_data(channels=message.text.strip())
+    await state.set_state(AuditFSM.speed)
+    await message.answer("3️⃣ <b>Как быстро вы отвечаете на заявку в среднем?</b>\nНапример: «сразу», «10 минут», «2 часа», «иногда забываем».", reply_markup=cancel_kb())
+
+@router.message(AuditFSM.speed)
+async def audit_speed(message: Message, state: FSMContext) -> None:
+    await state.update_data(speed=message.text.strip())
+    await state.set_state(AuditFSM.contact)
+    await message.answer("4️⃣ <b>Куда прислать разбор?</b>\nОставьте Telegram-юзернейм или телефон для связи.", reply_markup=cancel_kb())
+
+@router.message(AuditFSM.contact)
+async def audit_contact(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.clear()
+    user = message.from_user
+    lead_id = save_lead(
+        tg_id=user.id,
+        username=f"@{user.username}" if user.username else "—",
+        niche=data.get("niche", "—"),
+        channels=data.get("channels", "—"),
+        speed=data.get("speed", "—"),
+        contact=message.text.strip(),
+    )
+    await message.answer(
+        "✅ <b>Спасибо! Заявка принята.</b>\n\n"
+        "Мы изучим ваш запрос и вернёмся с персональным разбором "
+        "в ближайшее время.\n\n"
+        "А пока — можете написать напрямую 👇",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✉️ Написать напрямую", url=PERSONAL_LINK)],
+            [InlineKeyboardButton(text="⬅️ В главное меню", callback_data="menu:back")],
+        ]),
+    )
+    admin_text = (
+        "🔔 <b>НОВАЯ ЗАЯВКА НА АУДИТ</b>\n\n"
+        f"🆔 <b>Lead ID:</b> {lead_id}\n"
+        f"👤 <b>Пользователь:</b> {user.full_name}\n"
+        f"🔗 <b>Username:</b> @{user.username if user.username else '—'}\n"
+        f"🆔 <b>TG ID:</b> <code>{user.id}</code>\n\n"
+        f"🏢 <b>Ниша:</b> {data.get('niche')}\n"
+        f"📥 <b>Каналы заявок:</b> {data.get('channels')}\n"
+        f"⚡️ <b>Скорость ответа:</b> {data.get('speed')}\n"
+        f"📞 <b>Контакт:</b> {message.text.strip()}"
+    )
+    try:
+        await bot.send_message(ADMIN_ID, admin_text)
+    except Exception as e:
+        log.error(f"Не удалось отправить уведомление админу: {e}")
+
+@router.callback_query(F.data == "audit:cancel")
+async def audit_cancel(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    await bot.send_message(call.message.chat.id, "❌ Аудит отменён. Если захотите — вернёмся в любой момент.", reply_markup=main_menu_kb())
+    await call.answer()
+
+@router.message()
+async def fallback(message: Message, state: FSMContext) -> None:
+    if await state.get_state() is not None:
+        return
+    await message.answer("🤖 Чтобы начать — нажмите /start или выберите пункт меню.", reply_markup=main_menu_kb())
+
+
+# ============================================================
+# Точка входа: WEBHOOK для Render
+# ============================================================
+async def healthcheck(request: web.Request) -> web.Response:
+    """Эндпоинт для cron-job.org, чтобы Render не засыпал."""
+    return web.Response(text="OK")
+
+async def on_startup(bot: Bot) -> None:
+    """Устанавливает webhook при старте сервера."""
+    if not BASE_URL:
+        log.warning("BASE_URL не задан. Webhook не будет установлен.")
+        return
+    webhook_url = f"{BASE_URL}/webhook"
+    await bot.set_webhook(webhook_url)
+    log.info(f"Webhook установлен: {webhook_url}")
+
+def main() -> None:
+    """Запускает aiohttp-сервер для webhook."""
+    init_db()
+    ensure_images()
+
+    app = web.Application()
+
+    # /health — для cron-job.org
+    app.router.add_get("/health", healthcheck)
+
+    # Webhook-обработчик aiogram
+    webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
+    webhook_handler.register(app, path="/webhook")
+
+    # Хуки старта/остановки
+    setup_application(app, dp, bot=bot, on_startup=on_startup)
+
+    # Render передаёт порт в переменной PORT
+    port = int(os.getenv("PORT", 10000))
+    web.run_app(app, host="0.0.0.0", port=port)
+
 
 if __name__ == "__main__":
-    # Запускаем Flask в отдельном потоке, чтобы не блокировать основной
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    # Запускаем бота в основном потоке
-    asyncio.run(run_bot())
+    try:
+        main()
+    except (KeyboardInterrupt, SystemExit):
+        log.info("Бот остановлен.")
