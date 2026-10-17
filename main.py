@@ -79,21 +79,21 @@ IMAGE_META = {
     IMG_WELCOME: dict(
         title="Stryx",
         subtitle="AI-автоматизация продаж · 24/7",
-        chips=["Telegram-боты", "AI-агенты", "CRM-конвейеры", "Дашборды"],
+        chips=["Telegram-боты", "AI-агенты", "CRM", "Дашборды"],
     ),
     IMG_ABOUT: dict(
         title="Stryx Automation",
         subtitle="Студия автоматизации · 30+ проектов",
         badge="ABOUT",
-        chips=["aiogram 3", "n8n", "YandexGPT", "GigaChat", "amoCRM"],
+        chips=["aiogram", "n8n", "YandexGPT", "GigaChat", "CRM"],
     ),
     IMG_CASE_1: dict(
         title="Агентство недвижимости",
         subtitle="Казань · AI-агент на YandexGPT",
         badge="КЕЙС 01",
-        stats=[("40мин→3с", "время ответа"),
-               ("+30%",     "просмотры"),
-               ("+22%",     "конверсия")],
+        stats=[("3 сек", "вместо 40 мин"),
+               ("+30%",  "просмотры"),
+               ("+22%",  "конверсия")],
     ),
     IMG_CASE_2: dict(
         title="Детейлинг-центр",
@@ -109,14 +109,13 @@ IMAGE_META = {
         badge="КЕЙС 03",
         stats=[("0",     "потерь"),
                ("+18%",  "сделок"),
-               ("5→1",   "канал")],
+               ("5 в 1", "канал")],
     ),
 }
 
 
 # ---------- Вспомогательные функции отрисовки ----------
 def _hex(h: str) -> tuple[int, int, int]:
-    """'#RRGGBB' → (r, g, b)."""
     h = h.lstrip("#")
     return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
 
@@ -144,7 +143,8 @@ def _draw_center(draw, text: str, font, fill, cx: int, y: int) -> None:
 
 
 def _draw_tracked_center(draw, text: str, font, fill, cx: int, y: int,
-                         tracking: int = 8) -> None:
+                         tracking: int = 10) -> None:
+    """Текст по центру с умеренной разрядкой (для коротких заголовков)."""
     widths = [_text_w(draw, ch, font) for ch in text]
     total = sum(widths) + tracking * (len(text) - 1)
     x = cx - total // 2
@@ -155,6 +155,7 @@ def _draw_tracked_center(draw, text: str, font, fill, cx: int, y: int,
 
 def _fit_font(draw, text: str, max_width: int, start_size: int,
               bold: bool = True, min_size: int = 24):
+    """Подбирает размер шрифта, чтобы текст влез в max_width."""
     size = start_size
     while size > min_size:
         font = _load_font(size, bold)
@@ -166,6 +167,7 @@ def _fit_font(draw, text: str, max_width: int, start_size: int,
 
 def _glow(img, cx: int, cy: int, radius: int,
           color: tuple[int, int, int], alpha: int = 120) -> None:
+    """Мягкое радиальное свечение на фон."""
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
     od = ImageDraw.Draw(overlay)
     od.ellipse([cx - radius, cy - radius, cx + radius, cy + radius],
@@ -175,11 +177,12 @@ def _glow(img, cx: int, cy: int, radius: int,
 
 
 def _blend_rect(img, rect, radius: int, fill_rgba, outline_rgba=None) -> None:
+    """Полупрозрачный скруглённый прямоугольник через alpha_composite."""
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
     od = ImageDraw.Draw(overlay)
     if outline_rgba:
         od.rounded_rectangle(rect, radius=radius,
-                             fill=fill_rgba, outline=outline_rgba, width=1)
+                             fill=fill_rgba, outline=outline_rgba, width=2)
     else:
         od.rounded_rectangle(rect, radius=radius, fill=fill_rgba)
     img.alpha_composite(overlay)
@@ -209,9 +212,10 @@ def _draw_logo_mark(draw, x: int, y: int, size: int, accent) -> None:
 
 def _draw_chip(img, draw, x: int, y: int, text: str, font,
                text_color=(255, 255, 255),
-               bg_rgba=(255, 255, 255, 26),
-               border_rgba=(255, 255, 255, 60)) -> int:
-    pad_x, pad_y = 22, 14
+               bg_rgba=(255, 255, 255, 36),
+               border_rgba=(255, 255, 255, 90)) -> int:
+    """Одна «пилюля» с текстом. Возвращает её ширину."""
+    pad_x, pad_y = 30, 18
     bbox = draw.textbbox((0, 0), text, font=font)
     tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
@@ -225,12 +229,13 @@ def _draw_chip(img, draw, x: int, y: int, text: str, font,
 
 
 def _draw_chips_row(img, draw, chips: list[str], cx: int, y: int,
-                    font_size: int = 22, gap: int = 14) -> None:
-    max_w = img.width - 100
+                    font_size: int = 34, gap: int = 18) -> None:
+    """Ряд чипов по центру. Автоуменьшение шрифта, если не помещается."""
+    max_w = img.width - 80
     size = font_size
-    while size > 14:
+    while size > 20:
         font = _load_font(size)
-        widths = [_text_w(draw, c, font) + 44 for c in chips]
+        widths = [_text_w(draw, c, font) + 60 for c in chips]
         total = sum(widths) + gap * (len(chips) - 1)
         if total <= max_w:
             break
@@ -239,7 +244,7 @@ def _draw_chips_row(img, draw, chips: list[str], cx: int, y: int,
     real_widths = []
     for c in chips:
         bbox = draw.textbbox((0, 0), c, font=font)
-        real_widths.append(bbox[2] - bbox[0] + 44)
+        real_widths.append(bbox[2] - bbox[0] + 60)
     total = sum(real_widths) + gap * (len(chips) - 1)
     x = cx - total // 2
     for c, w in zip(chips, real_widths):
@@ -247,71 +252,76 @@ def _draw_chips_row(img, draw, chips: list[str], cx: int, y: int,
         x += w + gap
 
 
-def _draw_stat(draw, cx: int, y: int, value: str, label: str,
-               f_val, f_lbl, accent, secondary) -> None:
-    _draw_center(draw, value, f_val, accent, cx, y)
-    _draw_center(draw, label, f_lbl, secondary, cx, y + 76)
-
-
 def _make_placeholder(path: str, title: str, subtitle: str = "", *,
                       badge: str | None = None,
                       stats: list[tuple[str, str]] | None = None,
                       chips: list[str] | None = None,
                       size: tuple[int, int] = (1280, 720)) -> None:
+    """Создаёт крупную читаемую заглушку и сохраняет в JPG."""
     W, H = size
     accent1   = _hex("#6366F1")
     accent2   = _hex("#22D3EE")
     white     = (255, 255, 255)
-    secondary = _hex("#94A3B8")
+    secondary = _hex("#A8B4C8")
 
+    # Фон + свечения
     img = _gradient_bg(W, H, _hex("#0B0F1A"), _hex("#1A1F3D")).convert("RGBA")
     _glow(img, int(W * 0.88), int(H * 0.10), 360, accent1, 130)
     _glow(img, int(W * 0.10), int(H * 0.95), 300, accent2, 70)
     draw = ImageDraw.Draw(img)
 
-    draw.rectangle([0, 0, W, 6], fill=accent1)
-    draw.rectangle([0, H - 6, W, H], fill=accent2)
+    # Верхняя и нижняя акцентные полоски
+    draw.rectangle([0, 0, W, 8], fill=accent1)
+    draw.rectangle([0, H - 8, W, H], fill=accent2)
 
-    _draw_logo_mark(draw, 48, 48, 56, accent1)
-    f_brand = _load_font(26, bold=True)
-    f_tag   = _load_font(12)
-    draw.text((48 + 56 + 16, 58), "STRYX", font=f_brand, fill=white)
-    draw.text((48 + 56 + 16, 92), "AUTOMATION", font=f_tag, fill=secondary)
+    # Логотип в левом верхнем углу (крупнее)
+    _draw_logo_mark(draw, 40, 40, 80, accent1)
+    f_brand = _load_font(38, bold=True)
+    f_tag   = _load_font(18)
+    draw.text((40 + 80 + 20, 52), "STRYX", font=f_brand, fill=white)
+    draw.text((40 + 80 + 20, 102), "AUTOMATION", font=f_tag, fill=secondary)
 
+    # Бейдж в правом верхнем углу
     if badge:
-        f_b  = _load_font(20, bold=True)
-        bw   = _text_w(draw, badge, f_b) + 32
-        bh   = 40
-        bx   = W - 48 - bw
-        _blend_rect(img, [bx, 48, bx + bw, 48 + bh], 20,
-                    (99, 102, 241, 80), (99, 102, 241, 150))
-        draw.text((bx + 16, 48 + 9), badge, font=f_b, fill=white)
+        f_b  = _load_font(30, bold=True)
+        bw   = _text_w(draw, badge, f_b) + 48
+        bh   = 58
+        bx   = W - 40 - bw
+        _blend_rect(img, [bx, 40, bx + bw, 40 + bh], 29,
+                    (99, 102, 241, 100), (99, 102, 241, 180))
+        draw.text((bx + 24, 40 + 12), badge, font=f_b, fill=white)
 
+    # Заголовок — очень крупный, авто-fit
     title_txt = title if badge else title.upper()
-    f_title = _fit_font(draw, title_txt, W - 200, 82, bold=True, min_size=40)
-    y_title = H // 2 - (140 if stats else 90)
+    f_title = _fit_font(draw, title_txt, W - 160, 140, bold=True, min_size=60)
+    y_title = H // 2 - (160 if stats else 100)
     if badge:
         _draw_center(draw, title_txt, f_title, white, W // 2, y_title)
     else:
         _draw_tracked_center(draw, title_txt, f_title, white,
-                             W // 2, y_title, tracking=8)
+                             W // 2, y_title, tracking=12)
 
+    # Подзаголовок — крупный
     if subtitle:
-        f_sub = _load_font(32)
+        f_sub = _fit_font(draw, subtitle, W - 160, 50, bold=False, min_size=28)
         _draw_center(draw, subtitle, f_sub, secondary,
-                     W // 2, y_title + 110)
+                     W // 2, y_title + 170)
 
+    # Статистика (для кейсов) — каждое значение подгоняется под колонку
     if stats:
-        f_val = _load_font(58, bold=True)
-        f_lbl = _load_font(20)
-        y_stat = H // 2 + 70
+        f_lbl = _load_font(30)
+        y_stat = H // 2 + 100
         step   = W // (len(stats) + 1)
+        col_w  = step - 40
         for i, (v, l) in enumerate(stats):
-            _draw_stat(draw, step * (i + 1), y_stat, v, l,
-                       f_val, f_lbl, accent2, secondary)
+            cx = step * (i + 1)
+            f_val = _fit_font(draw, v, col_w, 130, bold=True, min_size=44)
+            _draw_center(draw, v, f_val, accent2, cx, y_stat)
+            _draw_center(draw, l, f_lbl, secondary, cx, y_stat + 150)
 
+    # Чипы (для welcome/about)
     if chips:
-        _draw_chips_row(img, draw, chips, W // 2, H - 110)
+        _draw_chips_row(img, draw, chips, W // 2, H - 140, font_size=34)
 
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     img.convert("RGB").save(path, "JPEG", quality=92)
@@ -873,12 +883,10 @@ async def fallback(message: Message, state: FSMContext) -> None:
 # WEBHOOK для Render
 # ============================================================
 async def healthcheck(request: web.Request) -> web.Response:
-    """Эндпоинт для UptimeRobot / cron-job.org — чтобы Render не засыпал."""
     return web.Response(text="OK")
 
 
 async def on_startup(bot: Bot) -> None:
-    """Устанавливает webhook при старте сервера."""
     if not BASE_URL:
         log.warning("BASE_URL не задан. Webhook не будет установлен.")
         return
@@ -888,26 +896,19 @@ async def on_startup(bot: Bot) -> None:
 
 
 def main() -> None:
-    """Запускает aiohttp-сервер для webhook."""
     init_db()
     ensure_images()
 
-    # Регистрируем on_startup в диспетчере (правильный способ для aiogram 3)
     dp.startup.register(on_startup)
 
     app = web.Application()
-
-    # /health — для UptimeRobot
     app.router.add_get("/health", healthcheck)
 
-    # Webhook-обработчик aiogram
     webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     webhook_handler.register(app, path="/webhook")
 
-    # Настраиваем жизненный цикл aiohttp и диспетчера
     setup_application(app, dp, bot=bot)
 
-    # Render передаёт порт в переменной PORT
     port = int(os.getenv("PORT", 10000))
     web.run_app(app, host="0.0.0.0", port=port)
 
